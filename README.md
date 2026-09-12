@@ -1,4 +1,4 @@
-# OctoBot v1.0.0
+# OctoBot v1.0.4
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -19,6 +19,11 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
   - Removing a timeout early voids that timeout from `/check` history, timeout count, and total timeout time while retaining the audit record.
 - `/warn`
 - `/warnings`
+- `/history user:@User amount:10`
+  - Shows a user's recent server messages, newest first. `amount` defaults to 10 and supports 1-50.
+  - New messages are indexed while OctoBot is online; when history is short, the command performs a bounded best-effort scan of recent readable channel history.
+  - Indexed messages remain visible if later deleted (including timeout cleanup) and are labelled **deleted**, so moderation context is not lost.
+  - Uses the same access permission as `/check`, so the default Helper role cannot use it.
 - `/check`
   - Shows the full active moderation history, including every warning/timeout reason, moderator, timestamp, timeout duration, and cleanup details.
   - Moderators/admins can remove individual history entries directly from the ephemeral `/check` panel using the red ❌ case buttons.
@@ -44,7 +49,7 @@ Both systems use:
 DATABASE_PATH=data/octobot.db
 ```
 
-The ZIP includes `data/octobot.db`, built by merging the databases from the supplied OctoTracker export and OctoCop archive. Existing tracker state and moderation role/settings state are preserved. The database is intentionally ignored by Git so Discord user/report/moderation history is not accidentally published to a public repository.
+Live data is stored in `data/octobot.db`. Update ZIPs intentionally do **not** include a live database, so replacing bot code will not overwrite tracker/moderation/message history. The database is ignored by Git so Discord user/report/moderation history is not accidentally published to a public repository.
 
 `tools/merge_databases.py` can be used if you need to merge newer copies later:
 
@@ -88,6 +93,8 @@ Tracker features need normal channel read/send/embed permissions in their config
 - Manage Messages (for timeout cleanup)
 - Moderate Members
 
+For `/history`, also enable **Message Content Intent** under **Discord Developer Portal → Bot → Privileged Gateway Intents**. `Read Message History` and `View Channels` determine which channels can be backfilled/read.
+
 Place the OctoBot Discord role above members/roles it needs to timeout.
 
 ## Preconfigured OctoWoW IDs
@@ -108,7 +115,7 @@ The `.env.example` contains the current supplied guild/channel/role IDs, includi
 
 On startup, the environment role IDs seed missing profiles only. Existing `/settings` changes in SQLite are not overwritten.
 
-- Helper: `/timeout`, maximum `1h`
+- Helper: `/timeout` + `/untimeout`, maximum issued timeout `1h`
 - Moderator: full moderation access, maximum `4w`
 - Admin: full moderation/settings access, maximum `4w`
 

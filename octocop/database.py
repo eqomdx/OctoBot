@@ -111,6 +111,20 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_timeouts_guild_user
                 ON timeouts(guild_id, user_id, started_at DESC);
+
+            CREATE TABLE IF NOT EXISTS message_history (
+                message_id INTEGER PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                attachment_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                edited_at TEXT,
+                deleted_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_history_guild_user
+                ON message_history(guild_id, user_id, created_at DESC, message_id DESC);
             """
         )
         await self._migrate_schema()
@@ -499,3 +513,104 @@ class Database:
             "last_warning": dict(last_warning) if last_warning else None,
             "last_timeout": dict(last_timeout) if last_timeout else None,
         }
+
+    async def record_message(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        user_id: int,
+        message_id: int,
+        content: str,
+        attachment_count: int,
+        created_at: datetime,
+        edited_at: datetime | None = None,
+        retain_per_user: int = 250,
+    ) -> None:
+        """Store/update a recent guild message used by /history.
+
+        The table is intentionally bounded per user so message indexing does not grow
+        forever on an active Discord server.
+        """
+        async with self._lock:
+            await self.db.execute(
+                """
+                INSERT INTO message_history(
+                    message_id, guild_id, channel_id, user_id, content,
+                    attachment_count, created_at, edited_at, deleted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    guild_id = excluded.guild_id,
+                    channel_id = excluded.channel_id,
+                    user_id = excluded.user_id,
+                    content = excluded.content,
+                    attachment_count = excluded.attachment_count,
+                    created_at = excluded.created_at,
+                    edited_at = excluded.edited_at,
+                    deleted_at = NULL
+                """,
+                (
+                    message_id,
+                    guild_id,
+                    channel_id,
+                    user_id,
+                    content,
+                    attachment_count,
+                    created_at.isoformat(),
+                    edited_at.isoformat() if edited_at is not None else None,
+                ),
+            )
+            # Keep only the newest N messages for this user in this guild.
+            if retain_per_user > 0:
+                await self.db.execute(
+                    """
+                    DELETE FROM message_history
+                    WHERE guild_id = ? AND user_id = ? AND message_id NOT IN (
+                        SELECT message_id FROM message_history
+                        WHERE guild_id = ? AND user_id = ?
+                        ORDER BY created_at DESC, message_id DESC
+                        LIMIT ?
+                    )
+                    """,
+                    (guild_id, user_id, guild_id, user_id, retain_per_user),
+                )
+            await self.db.commit()
+
+    async def mark_message_deleted(self, guild_id: int, message_id: int) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            "UPDATE message_history SET deleted_at = ? WHERE guild_id = ? AND message_id = ?",
+            (now, guild_id, message_id),
+        )
+        await self.db.commit()
+
+    async def mark_messages_deleted(self, guild_id: int, message_ids: Iterable[int]) -> None:
+        ids = [int(message_id) for message_id in message_ids]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            f"UPDATE message_history SET deleted_at = ? WHERE guild_id = ? AND message_id IN ({placeholders})",
+            [now, guild_id, *ids],
+        )
+        await self.db.commit()
+
+    async def list_recent_messages(
+        self, guild_id: int, user_id: int, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 50))
+        async with self.db.execute(
+            """
+            SELECT message_id, guild_id, channel_id, user_id, content,
+                   attachment_count, created_at, edited_at, deleted_at
+            FROM message_history
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY created_at DESC, message_id DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(row) for row in rows]
+

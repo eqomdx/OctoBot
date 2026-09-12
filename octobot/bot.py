@@ -65,6 +65,7 @@ MODERATION_HELP_DESCRIPTIONS: dict[str, str] = {
     "warnings": "View a member's recorded warnings.",
     "check": "View a member's complete warning/timeout history and reasons.",
     "clearcheck": "Clear a member's recorded /check history.",
+    "history": "Show a member's recent server messages.",
     "settings": "Configure OctoBot moderation permissions and behaviour.",
 }
 
@@ -84,7 +85,11 @@ class OctoBot(commands.Bot):
         self.radio_client: RadioClient | None = None
         self.radio_monitor: RadioMonitor | None = None
 
-        super().__init__(command_prefix="!", intents=discord.Intents.default())
+        intents = discord.Intents.default()
+        # Required for /history to index message text from guild message events.
+        # Enable Message Content Intent in the Discord Developer Portal as well.
+        intents.message_content = True
+        super().__init__(command_prefix="!", intents=intents)
 
         command_definitions = (
             ("status", "Check the current OctoWoW server status.", self.status_command),
@@ -193,7 +198,7 @@ class OctoBot(commands.Bot):
         if self.config.helper_role_id is not None:
             profiles.append(RolePermissions(
                 guild_id=guild_id, role_id=self.config.helper_role_id,
-                can_timeout=True, max_timeout_seconds=3600,
+                can_timeout=True, can_untimeout=True, max_timeout_seconds=3600,
             ))
         if self.config.moderator_role_id is not None:
             profiles.append(RolePermissions(
@@ -211,9 +216,26 @@ class OctoBot(commands.Bot):
             ))
 
         for profile in profiles:
-            if await self.moderation_database.get_role_profile(guild_id, profile.role_id) is None:
+            existing = await self.moderation_database.get_role_profile(guild_id, profile.role_id)
+            if existing is None:
                 await self.moderation_database.upsert_role_profile(profile)
                 LOGGER.info("Seeded OctoBot moderation role profile: %s", profile.role_id)
+            elif (
+                self.config.helper_role_id is not None
+                and profile.role_id == self.config.helper_role_id
+                and existing.can_timeout
+                and not existing.can_warn
+                and not existing.can_view_warnings
+                and not existing.can_check
+                and not existing.can_untimeout
+                and not existing.can_manage_settings
+                and existing.max_timeout_seconds == 3600
+            ):
+                # Upgrade the original Helper seed from /timeout-only to the intended
+                # /timeout + /untimeout profile without touching customized profiles.
+                existing.can_untimeout = True
+                await self.moderation_database.upsert_role_profile(existing)
+                LOGGER.info("Upgraded Helper default profile to allow /untimeout: %s", profile.role_id)
 
     async def on_ready(self) -> None:
         if self.user is None:
@@ -458,6 +480,7 @@ class OctoBot(commands.Bot):
                 visible.append(("warnings", MODERATION_HELP_DESCRIPTIONS["warnings"]))
             if mod_perms.can_check:
                 visible.append(("check", MODERATION_HELP_DESCRIPTIONS["check"]))
+                visible.append(("history", MODERATION_HELP_DESCRIPTIONS["history"]))
             if mod_perms.can_manage_settings:
                 visible.append(("clearcheck", MODERATION_HELP_DESCRIPTIONS["clearcheck"]))
                 visible.append(("settings", MODERATION_HELP_DESCRIPTIONS["settings"]))

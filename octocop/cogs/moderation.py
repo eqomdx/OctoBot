@@ -23,6 +23,55 @@ class ModerationCog(commands.Cog):
     def __init__(self, bot: "OctoBot"):
         self.bot = bot
 
+
+    async def _index_message(self, message: discord.Message) -> None:
+        if message.guild is None or message.guild.id != self.bot.config.guild_id:
+            return
+        if message.author.bot:
+            return
+        await self.bot.moderation_database.record_message(
+            guild_id=message.guild.id,
+            channel_id=message.channel.id,
+            user_id=message.author.id,
+            message_id=message.id,
+            content=message.content or "",
+            attachment_count=len(message.attachments),
+            created_at=message.created_at,
+            edited_at=message.edited_at,
+        )
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        try:
+            await self._index_message(message)
+        except Exception:
+            log.exception("Failed to index Discord message %s", getattr(message, "id", None))
+
+    @commands.Cog.listener()
+    async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
+        try:
+            await self._index_message(after)
+        except Exception:
+            log.exception("Failed to update indexed Discord message %s", getattr(after, "id", None))
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        if payload.guild_id != self.bot.config.guild_id:
+            return
+        try:
+            await self.bot.moderation_database.mark_message_deleted(payload.guild_id, payload.message_id)
+        except Exception:
+            log.exception("Failed to mark deleted message %s in /history index", payload.message_id)
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
+        if payload.guild_id != self.bot.config.guild_id:
+            return
+        try:
+            await self.bot.moderation_database.mark_messages_deleted(payload.guild_id, payload.message_ids)
+        except Exception:
+            log.exception("Failed to mark bulk-deleted messages in /history index")
+
     async def _member_and_guild(
         self, interaction: discord.Interaction
     ) -> tuple[discord.Member, discord.Guild] | None:
@@ -466,6 +515,109 @@ class ModerationCog(commands.Cog):
             ephemeral=True,
         )
 
+
+    async def _backfill_recent_messages(
+        self, *, guild: discord.Guild, user: discord.Member, amount: int
+    ) -> tuple[int, int]:
+        """Best-effort recent backfill for messages sent before this build was online.
+
+        Discord does not expose a bot-friendly server-wide author search endpoint, so this
+        scans a bounded number of recent messages from channels the bot can read. New
+        messages are indexed continuously and do not need this scan.
+        Returns (messages_scanned, matching_messages_indexed).
+        """
+        bot_member = guild.me
+        if bot_member is None:
+            return 0, 0
+
+        per_channel_limit = max(100, min(500, amount * 25))
+        total_scan_limit = 5000
+        scanned = 0
+        matched = 0
+        seen: set[int] = set()
+        candidates = [*guild.text_channels, *guild.threads]
+        candidates.sort(
+            key=lambda channel: int(getattr(channel, "last_message_id", 0) or 0),
+            reverse=True,
+        )
+
+        for channel in candidates:
+            channel_id = getattr(channel, "id", None)
+            if channel_id is None or channel_id in seen or not hasattr(channel, "history"):
+                continue
+            seen.add(channel_id)
+            try:
+                channel_perms = channel.permissions_for(bot_member)
+            except (AttributeError, TypeError):
+                continue
+            if not (channel_perms.view_channel and channel_perms.read_message_history):
+                continue
+
+            try:
+                async for message in channel.history(limit=per_channel_limit, oldest_first=False):
+                    scanned += 1
+                    if message.author.id == user.id and not message.author.bot:
+                        await self._index_message(message)
+                        matched += 1
+                    if scanned >= total_scan_limit:
+                        return scanned, matched
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+        return scanned, matched
+
+    def _message_history_embeds(
+        self, *, guild: discord.Guild, user: discord.Member, messages: list[dict]
+    ) -> list[discord.Embed]:
+        if not messages:
+            embed = discord.Embed(
+                title=f"Message history — {user}",
+                description=(
+                    "No indexed messages were found for this user. OctoBot indexes new "
+                    "messages while it is online and performs a bounded recent-history scan "
+                    "when `/history` is used."
+                ),
+            )
+            embed.set_footer(text=f"User ID: {user.id}")
+            return [embed]
+
+        per_page = 10
+        pages: list[discord.Embed] = []
+        total_pages = (len(messages) + per_page - 1) // per_page
+        for page_index in range(total_pages):
+            chunk = messages[page_index * per_page : (page_index + 1) * per_page]
+            embed = discord.Embed(
+                title=f"Message history — {user}",
+                description=f"Showing **{len(messages)}** most recent indexed message(s).",
+            )
+            for row in chunk:
+                created = discord.utils.parse_time(str(row["created_at"]))
+                ts = int(created.timestamp()) if created is not None else 0
+                content = str(row.get("content") or "").strip()
+                attachment_count = int(row.get("attachment_count") or 0)
+                if not content:
+                    content = (
+                        f"*[Attachment-only message — {attachment_count} attachment(s)]*"
+                        if attachment_count
+                        else "*[No text content]*"
+                    )
+                if len(content) > 850:
+                    content = content[:847] + "..."
+                message_id = int(row["message_id"])
+                channel_id = int(row["channel_id"])
+                jump_url = f"https://discord.com/channels/{guild.id}/{channel_id}/{message_id}"
+                edited_note = " • edited" if row.get("edited_at") else ""
+                deleted_note = " • **deleted**" if row.get("deleted_at") else ""
+                location = f"<#{channel_id}> • <t:{ts}:R>{edited_note}{deleted_note}"
+                if not row.get("deleted_at"):
+                    location += f" • [Jump to message]({jump_url})"
+                value = f"{content}\n{location}"
+                embed.add_field(name=f"Message `{message_id}`", value=value, inline=False)
+            embed.set_footer(
+                text=f"Page {page_index + 1}/{total_pages} • User ID: {user.id}"
+            )
+            pages.append(embed)
+        return pages
+
     def _warnings_embeds(
         self, *, guild: discord.Guild, user: discord.Member, warnings: list[dict]
     ) -> list[discord.Embed]:
@@ -542,6 +694,57 @@ class ModerationCog(commands.Cog):
             return
 
         await interaction.response.send_message(embed=embeds[0], ephemeral=True)
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+    @app_commands.command(name="history", description="Show a user's recent server messages.")
+    @app_commands.describe(
+        user="User whose recent messages should be shown",
+        amount="Number of messages to show (default 10, maximum 50)",
+    )
+    @app_commands.guild_only()
+    async def history_command(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        amount: app_commands.Range[int, 1, 50] = 10,
+    ) -> None:
+        context = await self._member_and_guild(interaction)
+        if context is None:
+            return
+        actor, guild = context
+        perms = await self.bot.moderation_permissions.for_member(actor)
+        # /history follows /check access so Helpers remain limited to timeout tools.
+        if not perms.can_check:
+            await interaction.response.send_message(
+                "You do not have permission to use `/history`.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        messages = await self.bot.moderation_database.list_recent_messages(
+            guild.id, user.id, amount
+        )
+        scan_note = ""
+        if len(messages) < amount:
+            scanned, matched = await self._backfill_recent_messages(
+                guild=guild, user=user, amount=amount
+            )
+            messages = await self.bot.moderation_database.list_recent_messages(
+                guild.id, user.id, amount
+            )
+            if scanned:
+                scan_note = (
+                    f"\n*Recent backfill scanned {scanned} message(s) and found "
+                    f"{matched} from this user.*"
+                )
+
+        embeds = self._message_history_embeds(guild=guild, user=user, messages=messages)
+        if scan_note:
+            description = embeds[0].description or ""
+            embeds[0].description = description + scan_note
+        await interaction.followup.send(embed=embeds[0], ephemeral=True)
         for embed in embeds[1:]:
             await interaction.followup.send(embed=embed, ephemeral=True)
 
