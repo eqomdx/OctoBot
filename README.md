@@ -20,8 +20,9 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 - `/warn`
 - `/warnings`
 - `/history user:@User amount:10`
-  - Shows a user's recent server messages, newest first. `amount` defaults to 10 and supports 1-50.
-  - New messages are indexed while OctoBot is online; when history is short, the command performs a bounded best-effort scan of recent readable channel history.
+  - Shows a user's most recent messages across all readable server text channels and active threads. `amount` defaults to 10 and supports 1-50.
+  - The selected messages are shown oldest-to-newest, ending with **Most recent**, and every entry identifies its channel.
+  - New messages are indexed while OctoBot is online; when history is short, the command performs a server-wide newest-first merged backfill rather than scanning one channel at a time.
   - Indexed messages remain visible if later deleted (including timeout cleanup) and are labelled **deleted**, so moderation context is not lost.
   - Uses the same access permission as `/check`, so the default Helper role cannot use it.
 - `/check`
@@ -128,3 +129,7 @@ The merged database currently has automatic timeout message cleanup set to `0` m
 ## Notes
 
 PyNaCl/davey voice warnings are harmless; OctoBot does not use Discord voice.
+
+## v1.0.5 message-history ordering
+
+`/history` merges readable channel histories by Discord message ID so fallback scanning is server-wide newest-first rather than channel-by-channel. The selected last X messages are displayed oldest-to-newest with a channel on every entry.

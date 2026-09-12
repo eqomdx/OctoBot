@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -518,29 +519,24 @@ class ModerationCog(commands.Cog):
 
     async def _backfill_recent_messages(
         self, *, guild: discord.Guild, user: discord.Member, amount: int
-    ) -> tuple[int, int]:
-        """Best-effort recent backfill for messages sent before this build was online.
+    ) -> tuple[int, int, int, bool]:
+        """Backfill a user's newest messages across all readable guild channels.
 
-        Discord does not expose a bot-friendly server-wide author search endpoint, so this
-        scans a bounded number of recent messages from channels the bot can read. New
-        messages are indexed continuously and do not need this scan.
-        Returns (messages_scanned, matching_messages_indexed).
+        Discord has no server-wide author-history endpoint for bots. To preserve true
+        server-wide recency, this performs a k-way merge of channel histories using
+        Discord snowflake message IDs (which are globally time-sortable). It therefore
+        walks the guild's messages newest-first across channels rather than finishing
+        one channel before moving to the next.
+
+        Returns (messages_scanned, matching_messages_indexed, channels_scanned, capped).
         """
         bot_member = guild.me
         if bot_member is None:
-            return 0, 0
+            return 0, 0, 0, False
 
-        per_channel_limit = max(100, min(500, amount * 25))
-        total_scan_limit = 5000
-        scanned = 0
-        matched = 0
         seen: set[int] = set()
         candidates = [*guild.text_channels, *guild.threads]
-        candidates.sort(
-            key=lambda channel: int(getattr(channel, "last_message_id", 0) or 0),
-            reverse=True,
-        )
-
+        readable: list = []
         for channel in candidates:
             channel_id = getattr(channel, "id", None)
             if channel_id is None or channel_id in seen or not hasattr(channel, "history"):
@@ -550,20 +546,63 @@ class ModerationCog(commands.Cog):
                 channel_perms = channel.permissions_for(bot_member)
             except (AttributeError, TypeError):
                 continue
-            if not (channel_perms.view_channel and channel_perms.read_message_history):
-                continue
+            if channel_perms.view_channel and channel_perms.read_message_history:
+                readable.append(channel)
 
+        # Keep a hard safety ceiling for a user who has barely spoken in a huge server.
+        # New messages are continuously indexed, so this cap primarily affects one-time
+        # backfilling of messages from before /history existed.
+        total_scan_limit = max(20_000, amount * 1_000)
+        scanned = 0
+        matched = 0
+        sequence = 0
+        heap: list[tuple[int, int, discord.Message, object]] = []
+
+        # Prime one newest message from every readable channel/thread.
+        for channel in readable:
+            iterator = channel.history(limit=None, oldest_first=False).__aiter__()
             try:
-                async for message in channel.history(limit=per_channel_limit, oldest_first=False):
-                    scanned += 1
-                    if message.author.id == user.id and not message.author.bot:
-                        await self._index_message(message)
-                        matched += 1
-                    if scanned >= total_scan_limit:
-                        return scanned, matched
+                message = await iterator.__anext__()
+            except StopAsyncIteration:
+                continue
             except (discord.Forbidden, discord.HTTPException):
                 continue
-        return scanned, matched
+            heapq.heappush(heap, (-int(message.id), sequence, message, iterator))
+            sequence += 1
+
+        while heap and matched < amount and scanned < total_scan_limit:
+            _, _, message, iterator = heapq.heappop(heap)
+            scanned += 1
+
+            if message.author.id == user.id and not message.author.bot:
+                await self._index_message(message)
+                matched += 1
+
+            try:
+                next_message = await iterator.__anext__()
+            except StopAsyncIteration:
+                next_message = None
+            except (discord.Forbidden, discord.HTTPException):
+                next_message = None
+            if next_message is not None:
+                heapq.heappush(
+                    heap, (-int(next_message.id), sequence, next_message, iterator)
+                )
+                sequence += 1
+
+        capped = bool(heap) and matched < amount and scanned >= total_scan_limit
+        return scanned, matched, len(readable), capped
+
+    @staticmethod
+    def _recency_label(position_from_newest: int) -> str:
+        if position_from_newest <= 1:
+            return "Most recent"
+        n = position_from_newest
+        if 10 <= n % 100 <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suffix} most recent"
 
     def _message_history_embeds(
         self, *, guild: discord.Guild, user: discord.Member, messages: list[dict]
@@ -580,16 +619,22 @@ class ModerationCog(commands.Cog):
             embed.set_footer(text=f"User ID: {user.id}")
             return [embed]
 
+        # The database returns newest-first so LIMIT selects the correct last X. Display
+        # those selected messages oldest-to-newest, ending with the user's most recent.
+        ordered_messages = list(reversed(messages))
         per_page = 10
         pages: list[discord.Embed] = []
-        total_pages = (len(messages) + per_page - 1) // per_page
+        total_pages = (len(ordered_messages) + per_page - 1) // per_page
         for page_index in range(total_pages):
-            chunk = messages[page_index * per_page : (page_index + 1) * per_page]
+            start_index = page_index * per_page
+            chunk = ordered_messages[start_index : start_index + per_page]
             embed = discord.Embed(
                 title=f"Message history — {user}",
                 description=f"Showing **{len(messages)}** most recent indexed message(s).",
             )
-            for row in chunk:
+            for local_index, row in enumerate(chunk):
+                global_index = start_index + local_index
+                position_from_newest = len(ordered_messages) - global_index
                 created = discord.utils.parse_time(str(row["created_at"]))
                 ts = int(created.timestamp()) if created is not None else 0
                 content = str(row.get("content") or "").strip()
@@ -607,11 +652,14 @@ class ModerationCog(commands.Cog):
                 jump_url = f"https://discord.com/channels/{guild.id}/{channel_id}/{message_id}"
                 edited_note = " • edited" if row.get("edited_at") else ""
                 deleted_note = " • **deleted**" if row.get("deleted_at") else ""
-                location = f"<#{channel_id}> • <t:{ts}:R>{edited_note}{deleted_note}"
+                location = f"<t:{ts}:R>{edited_note}{deleted_note}"
                 if not row.get("deleted_at"):
                     location += f" • [Jump to message]({jump_url})"
                 value = f"{content}\n{location}"
-                embed.add_field(name=f"Message `{message_id}`", value=value, inline=False)
+                recency = self._recency_label(position_from_newest)
+                embed.add_field(
+                    name=f"{recency} • <#{channel_id}>", value=value, inline=False
+                )
             embed.set_footer(
                 text=f"Page {page_index + 1}/{total_pages} • User ID: {user.id}"
             )
@@ -728,16 +776,18 @@ class ModerationCog(commands.Cog):
         )
         scan_note = ""
         if len(messages) < amount:
-            scanned, matched = await self._backfill_recent_messages(
+            scanned, matched, channels_scanned, capped = await self._backfill_recent_messages(
                 guild=guild, user=user, amount=amount
             )
             messages = await self.bot.moderation_database.list_recent_messages(
                 guild.id, user.id, amount
             )
             if scanned:
+                cap_note = " Scan limit reached." if capped else ""
                 scan_note = (
-                    f"\n*Recent backfill scanned {scanned} message(s) and found "
-                    f"{matched} from this user.*"
+                    f"\n*Server-wide backfill scanned {scanned} recent message(s) across "
+                    f"{channels_scanned} readable channel(s)/thread(s) and found "
+                    f"{matched} from this user.{cap_note}*"
                 )
 
         embeds = self._message_history_embeds(guild=guild, user=user, messages=messages)
