@@ -389,7 +389,8 @@ CREATE TABLE IF NOT EXISTS radio_schedule_announcements (
     scheduled_start TEXT NOT NULL,
     scheduled_end TEXT,
     announced_at TEXT NOT NULL,
-    message_id INTEGER
+    message_id INTEGER,
+    ended_followup_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS report_alert_state (
@@ -464,6 +465,9 @@ class Database:
             "announcements",
             "delivery_pages_sent",
             "INTEGER NOT NULL DEFAULT 0",
+        )
+        await self._ensure_column(
+            "radio_schedule_announcements", "ended_followup_at", "TEXT"
         )
 
     async def _ensure_column(
@@ -1489,6 +1493,41 @@ class Database:
                     _iso(announced_at),
                     message_id,
                 ),
+            )
+            await self._connection().commit()
+
+    async def ended_shows_awaiting_followup(
+        self, station_identifier: str, now: datetime, grace: timedelta
+    ) -> list[str]:
+        """Keys of announced shows whose scheduled end passed within ``grace``."""
+        async with self._lock:
+            cursor = await self._connection().execute(
+                """
+                SELECT occurrence_key FROM radio_schedule_announcements
+                WHERE station_identifier = ? AND ended_followup_at IS NULL
+                  AND scheduled_end IS NOT NULL AND scheduled_end <= ? AND scheduled_end >= ?
+                ORDER BY scheduled_end ASC
+                """,
+                (station_identifier, _iso(now), _iso(now - grace)),
+            )
+            rows = await cursor.fetchall()
+        return [str(row["occurrence_key"]) for row in rows]
+
+    async def mark_ended_followup_posted(
+        self, occurrence_keys: Iterable[str], posted_at: datetime
+    ) -> None:
+        keys = [key for key in occurrence_keys if key]
+        if not keys:
+            return
+        placeholders = ",".join("?" for _ in keys)
+        async with self._lock:
+            await self._connection().execute(
+                f"""
+                UPDATE radio_schedule_announcements
+                SET ended_followup_at = ?
+                WHERE occurrence_key IN ({placeholders})
+                """,
+                (_iso(posted_at), *keys),
             )
             await self._connection().commit()
 

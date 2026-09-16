@@ -167,6 +167,7 @@ class OctoBot(commands.Bot):
             self.session,
             self.config.radio_base_url,
             self.config.radio_station_shortcode,
+            schedule_days=self.config.radio_schedule_days,
         )
         self.radio_monitor = RadioMonitor(
             bot=self,

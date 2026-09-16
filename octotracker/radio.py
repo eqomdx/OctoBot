@@ -4,7 +4,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -13,7 +13,10 @@ import aiohttp
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEDULE_ROWS = 50
+# How far ahead the schedule is read. AzuraCast only expands recurring shows
+# (e.g. "every Wednesday 19:00") when asked for a start/end date range; the
+# ``rows`` parameter alone returns a single occurrence.
+DEFAULT_SCHEDULE_DAYS = 14
 
 LIVE = "live"
 AUTODJ = "autodj"
@@ -362,16 +365,27 @@ def failed_snapshot(
 
 class RadioClient:
     def __init__(
-        self, session: aiohttp.ClientSession, base_url: str, station_shortcode: str
+        self,
+        session: aiohttp.ClientSession,
+        base_url: str,
+        station_shortcode: str,
+        schedule_days: int = DEFAULT_SCHEDULE_DAYS,
     ):
         self.session = session
         self.base_url = base_url.rstrip("/")
         self.station_shortcode = station_shortcode
+        self.schedule_days = max(1, schedule_days)
         encoded = quote(station_shortcode, safe="")
         self.now_playing_url = f"{self.base_url}/api/nowplaying/{encoded}"
-        # AzuraCast returns only 5 rows by default; /nextshows wants everything queued.
-        self.schedule_url = f"{self.base_url}/api/station/{encoded}/schedule?rows={SCHEDULE_ROWS}"
+        self._schedule_base_url = f"{self.base_url}/api/station/{encoded}/schedule"
         self.public_url = f"{self.base_url}/public/{encoded}"
+
+    def schedule_url(self, now: datetime | None = None) -> str:
+        """Schedule endpoint for a date window starting today, matching the public page."""
+        current = (now or utc_now()).astimezone(timezone.utc)
+        start = current.date()
+        end = (current + timedelta(days=self.schedule_days)).date()
+        return f"{self._schedule_base_url}?start={start.isoformat()}&end={end.isoformat()}"
 
     async def _json(self, url: str) -> Any:
         async with self.session.get(url) as response:
@@ -395,7 +409,7 @@ class RadioClient:
         schedule_available = False
         schedule_error: str | None = None
         try:
-            schedule_payload = await self._json(self.schedule_url)
+            schedule_payload = await self._json(self.schedule_url(checked_at))
             if not isinstance(schedule_payload, (list, dict)):
                 raise ValueError("Schedule API returned an unsupported payload")
             schedule_available = True

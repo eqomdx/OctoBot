@@ -98,6 +98,8 @@ class Config:
     radio_live_alerts: bool = False
     # Optional "Name=url,Name=url" override of the built-in DJ Twitch table.
     radio_dj_streams: str | None = None
+    # Days of schedule to read; recurring shows repeat within this window.
+    radio_schedule_days: int = 14
     bot_commands_channel_id: int | None = None
     log_channel_id: int | None = None
     helper_role_id: int | None = None
@@ -171,6 +173,7 @@ class Config:
             ),
             radio_live_alerts=_boolean("RADIO_LIVE_ALERTS", False),
             radio_dj_streams=(os.getenv("RADIO_DJ_STREAMS", "").strip() or None),
+            radio_schedule_days=_positive_int("RADIO_SCHEDULE_DAYS", 14),
             # Kept only for backward compatibility with older OctoTracker .env files.
             # OctoBot commands are intentionally usable in every accessible channel.
             bot_commands_channel_id=_discord_id(

@@ -11,6 +11,7 @@ from octotracker.database import Database
 from octotracker.radio import (
     AUTODJ,
     LIVE,
+    RadioClient,
     RadioShow,
     dj_stream_url,
     failed_snapshot,
@@ -167,6 +168,17 @@ class RadioParserTests(unittest.TestCase):
         self.assertEqual(custom, {"grog": "https://www.twitch.tv/grog"})
         self.assertEqual(dj_stream_url("DJ Grog", custom), "https://www.twitch.tv/grog")
         self.assertIsNone(dj_stream_url("Mossa", custom))
+
+
+class RadioClientTests(unittest.TestCase):
+    def test_schedule_url_uses_a_date_window_so_recurring_shows_expand(self) -> None:
+        client = RadioClient(None, "https://radio.octowow.st/", "booty_bay_pirate_radio", schedule_days=14)
+        now = datetime(2026, 9, 16, 23, 30, tzinfo=timezone.utc)
+        self.assertEqual(
+            client.schedule_url(now),
+            "https://radio.octowow.st/api/station/booty_bay_pirate_radio/schedule?start=2026-09-16&end=2026-09-30",
+        )
+        self.assertEqual(client.public_url, "https://radio.octowow.st/public/booty_bay_pirate_radio")
 
 
 class NextShowsEmbedTests(unittest.TestCase):
@@ -611,6 +623,43 @@ class RadioMonitorDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.sent[0]["allowed_mentions"].roles[0].id, 1547108101747118100)
         for _ in range(3):
             await monitor.check()
+        self.assertEqual(len(channel.sent), 1)
+
+    async def test_next_shows_posted_once_when_announced_show_ends(self) -> None:
+        channel = _FakeChannel()
+        end = self.start + timedelta(hours=1)
+        client = _SequenceRadioClient([
+            self.snapshot(self.start, True),                      # announce at start
+            self.snapshot(self.start + timedelta(minutes=30), True),
+            self.snapshot(end - timedelta(seconds=10), True),      # not yet ended
+            self.snapshot(end, False),                             # ended -> list
+            self.snapshot(end + timedelta(seconds=10), False),     # no repeat
+            self.snapshot(end + timedelta(minutes=5), False),
+        ])
+        monitor = RadioMonitor(_FakeBot(channel), self.config, self.db, client)
+        for _ in range(3):
+            await monitor.check()
+        self.assertEqual(len(channel.sent), 1)
+        await monitor.check()
+        self.assertEqual(len(channel.sent), 2)
+        followup = channel.sent[1]
+        self.assertNotIn("content", followup)
+        self.assertEqual(followup["embed"].title, "📻 Upcoming Booty Bay Pirate Radio shows")
+        self.assertFalse(followup["allowed_mentions"].roles)
+        for _ in range(2):
+            await monitor.check()
+        self.assertEqual(len(channel.sent), 2)
+
+    async def test_ended_followup_skipped_when_end_missed_by_too_long(self) -> None:
+        channel = _FakeChannel()
+        end = self.start + timedelta(hours=1)
+        client = _SequenceRadioClient([
+            self.snapshot(self.start, True),
+            self.snapshot(end + timedelta(minutes=20), False),
+        ])
+        monitor = RadioMonitor(_FakeBot(channel), self.config, self.db, client)
+        await monitor.check()
+        await monitor.check()
         self.assertEqual(len(channel.sent), 1)
 
     async def test_missed_start_is_announced_within_grace_only(self) -> None:

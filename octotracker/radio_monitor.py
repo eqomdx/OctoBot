@@ -9,7 +9,7 @@ import discord
 
 from .config import Config
 from .database import Database, RadioOccurrence
-from .embeds import radio_live_embed
+from .embeds import next_shows_embeds, radio_live_embed
 from .radio import (
     DJ_TWITCH_STREAMS,
     LIVE,
@@ -29,6 +29,9 @@ RADIO_LISTEN_URL = (
 # at that moment it still announces on the next poll, but not once the show is this
 # far in: a late ping is worse than none.
 SCHEDULE_ANNOUNCE_GRACE = timedelta(minutes=10)
+# After an announced show's scheduled end, the upcoming-shows list is posted to the
+# radio channel so listeners see what is next. Same lateness cut-off as above.
+SHOW_ENDED_FOLLOWUP_GRACE = timedelta(minutes=10)
 
 
 def radio_notification_message(
@@ -113,6 +116,7 @@ class RadioMonitor:
             )
             if snapshot.source_ok and snapshot.schedule_available:
                 await self._announce_scheduled_shows(snapshot)
+                await self._post_next_shows_after_ended(snapshot)
             # Never deliver a stale "now live" alert after the source has already
             # moved back to AutoDJ/offline. Only the currently confirmed live
             # occurrence is eligible for delivery.
@@ -188,6 +192,42 @@ class RadioMonitor:
         """Fetch display data without changing notification/deduplication state."""
         return await self.client.fetch()
 
+    async def _post_next_shows_after_ended(self, snapshot: RadioSnapshot) -> None:
+        """Post the /nextshows list once per announced show, when its slot ends."""
+        channel_id = self.config.radio_channel_id
+        if channel_id is None:
+            return
+        ended = await self.database.ended_shows_awaiting_followup(
+            self.config.radio_station_shortcode, snapshot.checked_at, SHOW_ENDED_FOLLOWUP_GRACE
+        )
+        if not ended:
+            return
+        channel = await self._resolve_channel(channel_id)
+        if channel is None:
+            return
+        try:
+            for embed in next_shows_embeds(snapshot, self.dj_streams):
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.Forbidden, discord.HTTPException):
+            LOGGER.exception("Could not post the upcoming shows list to %s", channel_id)
+            return
+        # Several slots ending together get one list, not one each.
+        await self.database.mark_ended_followup_posted(ended, snapshot.checked_at)
+        LOGGER.info("Posted upcoming shows after %s show(s) ended", len(ended))
+
+    async def _resolve_channel(self, channel_id: int):
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                LOGGER.exception("Could not access radio channel %s", channel_id)
+                return None
+        if not hasattr(channel, "send"):
+            LOGGER.error("Radio channel %s cannot receive messages", channel_id)
+            return None
+        return channel
+
     async def _send_pending_notifications(self, occurrence_key: str) -> None:
         channel_id = self.config.radio_channel_id
         if channel_id is None:
@@ -211,15 +251,8 @@ class RadioMonitor:
     async def _send_occurrence(
         self, channel_id: int, occurrence: RadioOccurrence
     ) -> int | None:
-        channel = self.bot.get_channel(channel_id)
+        channel = await self._resolve_channel(channel_id)
         if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(channel_id)
-            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-                LOGGER.exception("Could not access radio channel %s", channel_id)
-                return None
-        if not hasattr(channel, "send"):
-            LOGGER.error("Radio channel %s cannot receive messages", channel_id)
             return None
 
         role_id = self.config.radio_ping_role_id

@@ -1,4 +1,4 @@
-# OctoBot v1.0.7
+# OctoBot v1.0.8
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -11,8 +11,9 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 - Official announcement monitoring and `/announcement`
 - Community `/report`, `/reports`, moderator report tools
 - Booty Bay Pirate Radio monitoring and `/radio`
-- `/nextshows` lists every upcoming scheduled show with absolute (`<t:…:f>`) and relative (`<t:…:R>`) Discord timestamps plus the DJ's Twitch link; same access rule as `/radio`.
+- `/nextshows` lists every upcoming scheduled show in the next `RADIO_SCHEDULE_DAYS` (default 14) with absolute (`<t:…:f>`) and relative (`<t:…:R>`) Discord timestamps plus the DJ's Twitch link; same access rule as `/radio`.
   - Each scheduled show is pinged to `DISCORD_RADIO_PING_ROLE_ID` in `DISCORD_RADIO_CHANNEL_ID` at its scheduled start time, naming the DJ from the station schedule. One ping per show; a start missed while the bot was down is still announced if the show is under 10 minutes in.
+  - When an announced show's scheduled end passes, the `/nextshows` list is posted to the same channel automatically (no ping), once per show.
   - `RADIO_LIVE_ALERTS=true` additionally pings when a DJ goes live outside the schedule.
   - The ping lists three ways to listen: in-game radio, the radio website, and the live DJ's own Twitch stream (Whiski, Mossa, Tekeela, Sabellwind are built in; `RADIO_DJ_STREAMS` overrides the table).
 - Tracker command role configuration under `/config command-role`
@@ -151,4 +152,8 @@ PyNaCl/davey voice warnings are harmless; OctoBot does not use Discord voice.
 
 Radio pings are now driven by the station schedule: the next show's DJ and start time are read from `/api/station/.../schedule` and the role is pinged when that time arrives, whether or not the DJ has connected yet. Live-detection pings caused duplicate announcements (early connects and stream dropouts each produced a fresh "now live") and are now opt-in via `RADIO_LIVE_ALERTS`; when enabled they never repeat a slot already announced from the schedule.
 
-The ping links the radio website and the live DJ's Twitch stream (Whiski, Mossa, Tekeela, Sabellwind built in; `RADIO_DJ_STREAMS` overrides). `/nextshows` lists every upcoming show with absolute and relative Discord timestamps.
+The ping links the radio website and the live DJ's Twitch stream (Whiski, Mossa, Tekeela, Sabellwind built in; `RADIO_DJ_STREAMS` overrides). `/nextshows` lists every upcoming show in the next `RADIO_SCHEDULE_DAYS` (default 14) with absolute and relative Discord timestamps. The schedule is read as a date window because AzuraCast only expands recurring shows for one.
+
+## v1.0.8 recurring shows and end-of-show follow-up
+
+The schedule is read as a `start`/`end` date window (`RADIO_SCHEDULE_DAYS`, default 14) because AzuraCast only expands recurring shows for a date range, so `/nextshows` now lists every repeat. When an announced show's scheduled end passes, the `/nextshows` list is posted to the radio channel automatically, once per show.
