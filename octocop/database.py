@@ -20,17 +20,24 @@ class RolePermissions:
     can_view_warnings: bool = False
     can_check: bool = False
     can_untimeout: bool = False
+    can_ban: bool = False
     can_manage_settings: bool = False
     max_timeout_seconds: int = MAX_TIMEOUT_SECONDS
 
 
 class Database:
+    HISTORY_TABLES = {
+        "warning": "warnings",
+        "timeout": "timeouts",
+        "ban": "bans",
+    }
     PERMISSION_COLUMNS = {
         "timeout": "can_timeout",
         "warn": "can_warn",
         "warnings": "can_view_warnings",
         "check": "can_check",
         "untimeout": "can_untimeout",
+        "ban": "can_ban",
         "settings": "can_manage_settings",
     }
 
@@ -65,6 +72,7 @@ class Database:
                 mod_log_channel_id INTEGER,
                 dm_warnings INTEGER NOT NULL DEFAULT 1,
                 dm_timeouts INTEGER NOT NULL DEFAULT 1,
+                dm_bans INTEGER NOT NULL DEFAULT 1,
                 timeout_cleanup_minutes INTEGER NOT NULL DEFAULT 0
             );
 
@@ -76,6 +84,7 @@ class Database:
                 can_view_warnings INTEGER NOT NULL DEFAULT 0,
                 can_check INTEGER NOT NULL DEFAULT 0,
                 can_untimeout INTEGER NOT NULL DEFAULT 0,
+                can_ban INTEGER NOT NULL DEFAULT 0,
                 can_manage_settings INTEGER NOT NULL DEFAULT 0,
                 max_timeout_seconds INTEGER NOT NULL DEFAULT 2419200,
                 PRIMARY KEY (guild_id, role_id)
@@ -112,6 +121,21 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_timeouts_guild_user
                 ON timeouts(guild_id, user_id, started_at DESC);
 
+            CREATE TABLE IF NOT EXISTS bans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                moderator_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                unbanned_at TEXT,
+                unbanned_by INTEGER,
+                unban_reason TEXT,
+                excluded_from_history INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_bans_guild_user
+                ON bans(guild_id, user_id, created_at DESC);
+
             CREATE TABLE IF NOT EXISTS message_history (
                 message_id INTEGER PRIMARY KEY,
                 guild_id INTEGER NOT NULL,
@@ -137,6 +161,22 @@ class Database:
         if "timeout_cleanup_minutes" not in guild_columns:
             await self.db.execute(
                 "ALTER TABLE guild_settings ADD COLUMN timeout_cleanup_minutes INTEGER NOT NULL DEFAULT 0"
+            )
+        if "dm_bans" not in guild_columns:
+            await self.db.execute(
+                "ALTER TABLE guild_settings ADD COLUMN dm_bans INTEGER NOT NULL DEFAULT 1"
+            )
+
+        async with self.db.execute("PRAGMA table_info(role_permissions)") as cur:
+            role_columns = {str(row["name"]) for row in await cur.fetchall()}
+        if "can_ban" not in role_columns:
+            await self.db.execute(
+                "ALTER TABLE role_permissions ADD COLUMN can_ban INTEGER NOT NULL DEFAULT 0"
+            )
+            # Roles that already had full access (Moderator/Admin profiles) keep full
+            # access by also receiving /ban. Helper-style profiles stay without it.
+            await self.db.execute(
+                "UPDATE role_permissions SET can_ban = 1 WHERE can_manage_settings = 1"
             )
 
         async with self.db.execute("PRAGMA table_info(warnings)") as cur:
@@ -194,7 +234,7 @@ class Database:
         await self.db.commit()
 
     async def set_dm_setting(self, guild_id: int, setting: str, enabled: bool) -> None:
-        if setting not in {"dm_warnings", "dm_timeouts"}:
+        if setting not in {"dm_warnings", "dm_timeouts", "dm_bans"}:
             raise ValueError("Unknown DM setting")
         await self.ensure_guild(guild_id)
         await self.db.execute(
@@ -208,14 +248,15 @@ class Database:
             """
             INSERT INTO role_permissions(
                 guild_id, role_id, can_timeout, can_warn, can_view_warnings,
-                can_check, can_untimeout, can_manage_settings, max_timeout_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                can_check, can_untimeout, can_ban, can_manage_settings, max_timeout_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, role_id) DO UPDATE SET
                 can_timeout = excluded.can_timeout,
                 can_warn = excluded.can_warn,
                 can_view_warnings = excluded.can_view_warnings,
                 can_check = excluded.can_check,
                 can_untimeout = excluded.can_untimeout,
+                can_ban = excluded.can_ban,
                 can_manage_settings = excluded.can_manage_settings,
                 max_timeout_seconds = excluded.max_timeout_seconds
             """,
@@ -227,6 +268,7 @@ class Database:
                 int(profile.can_view_warnings),
                 int(profile.can_check),
                 int(profile.can_untimeout),
+                int(profile.can_ban),
                 int(profile.can_manage_settings),
                 profile.max_timeout_seconds,
             ),
@@ -296,6 +338,7 @@ class Database:
             can_view_warnings=bool(row["can_view_warnings"]),
             can_check=bool(row["can_check"]),
             can_untimeout=bool(row["can_untimeout"]),
+            can_ban=bool(row["can_ban"]),
             can_manage_settings=bool(row["can_manage_settings"]),
             max_timeout_seconds=int(row["max_timeout_seconds"]),
         )
@@ -399,23 +442,82 @@ class Database:
             await self.db.commit()
             return timeout_id
 
+    async def add_ban(
+        self, guild_id: int, user_id: int, moderator_id: int, reason: str
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._lock:
+            cur = await self.db.execute(
+                """
+                INSERT INTO bans(guild_id, user_id, moderator_id, reason, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (guild_id, user_id, moderator_id, reason, now),
+            )
+            await self.db.commit()
+            return int(cur.lastrowid)
+
+    async def mark_latest_ban_unbanned(
+        self,
+        guild_id: int,
+        user_id: int,
+        moderator_id: int | None,
+        reason: str | None,
+    ) -> int | None:
+        """Record that the newest open ban ended.
+
+        Unlike /untimeout, the ban case stays in /check history: the whole point of
+        the record is that it is still visible if the user is ever let back in.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._lock:
+            async with self.db.execute(
+                """
+                SELECT id FROM bans
+                WHERE guild_id = ? AND user_id = ? AND unbanned_at IS NULL
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                (guild_id, user_id),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                return None
+            ban_id = int(row["id"])
+            await self.db.execute(
+                """
+                UPDATE bans
+                SET unbanned_at = ?, unbanned_by = ?, unban_reason = ?
+                WHERE id = ?
+                """,
+                (now, moderator_id, reason, ban_id),
+            )
+            await self.db.commit()
+            return ban_id
+
     async def list_moderation_history(self, guild_id: int, user_id: int) -> list[dict[str, Any]]:
-        """Return active /check history, newest first, with warnings and timeouts merged."""
+        """Return active /check history, newest first, with warnings, timeouts and bans merged."""
         async with self.db.execute(
             """
             SELECT id, guild_id, user_id, moderator_id, reason, created_at AS event_at,
                    'warning' AS kind, NULL AS duration_seconds, NULL AS cleanup_minutes,
-                   NULL AS messages_deleted
+                   NULL AS messages_deleted, NULL AS unbanned_at
             FROM warnings
             WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0
             UNION ALL
             SELECT id, guild_id, user_id, moderator_id, reason, started_at AS event_at,
-                   'timeout' AS kind, duration_seconds, cleanup_minutes, messages_deleted
+                   'timeout' AS kind, duration_seconds, cleanup_minutes, messages_deleted,
+                   NULL AS unbanned_at
             FROM timeouts
+            WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0
+            UNION ALL
+            SELECT id, guild_id, user_id, moderator_id, reason, created_at AS event_at,
+                   'ban' AS kind, NULL AS duration_seconds, NULL AS cleanup_minutes,
+                   NULL AS messages_deleted, unbanned_at
+            FROM bans
             WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0
             ORDER BY event_at DESC, id DESC
             """,
-            (guild_id, user_id, guild_id, user_id),
+            (guild_id, user_id, guild_id, user_id, guild_id, user_id),
         ) as cur:
             rows = await cur.fetchall()
         return [dict(row) for row in rows]
@@ -423,10 +525,10 @@ class Database:
     async def exclude_history_entry(
         self, guild_id: int, user_id: int, kind: str, case_id: int
     ) -> dict[str, Any] | None:
-        """Soft-remove one warning/timeout from user-facing moderation history."""
-        if kind not in {"warning", "timeout"}:
+        """Soft-remove one warning/timeout/ban from user-facing moderation history."""
+        table = self.HISTORY_TABLES.get(kind)
+        if table is None:
             raise ValueError("Unknown moderation history kind")
-        table = "warnings" if kind == "warning" else "timeouts"
         async with self._lock:
             async with self.db.execute(
                 f"SELECT * FROM {table} WHERE id = ? AND guild_id = ? AND user_id = ? AND excluded_from_history = 0",
@@ -457,6 +559,11 @@ class Database:
                 (guild_id, user_id),
             ) as cur:
                 timeout_count = int((await cur.fetchone())["count"])
+            async with self.db.execute(
+                "SELECT COUNT(*) AS count FROM bans WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
+                (guild_id, user_id),
+            ) as cur:
+                ban_count = int((await cur.fetchone())["count"])
             await self.db.execute(
                 "UPDATE warnings SET excluded_from_history = 1 WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
                 (guild_id, user_id),
@@ -465,8 +572,12 @@ class Database:
                 "UPDATE timeouts SET excluded_from_history = 1 WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
                 (guild_id, user_id),
             )
+            await self.db.execute(
+                "UPDATE bans SET excluded_from_history = 1 WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
+                (guild_id, user_id),
+            )
             await self.db.commit()
-        return {"warnings": warning_count, "timeouts": timeout_count}
+        return {"warnings": warning_count, "timeouts": timeout_count, "bans": ban_count}
 
     async def get_moderation_summary(self, guild_id: int, user_id: int) -> dict[str, Any]:
         async with self.db.execute(
@@ -486,6 +597,12 @@ class Database:
             row = await cur.fetchone()
             timeout_count = int(row["count"])
             total_timeout_seconds = int(row["total_seconds"])
+
+        async with self.db.execute(
+            "SELECT COUNT(*) AS count FROM bans WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
+            (guild_id, user_id),
+        ) as cur:
+            ban_count = int((await cur.fetchone())["count"])
 
         async with self.db.execute(
             """
@@ -509,6 +626,7 @@ class Database:
         return {
             "warning_count": warning_count,
             "timeout_count": timeout_count,
+            "ban_count": ban_count,
             "total_timeout_seconds": total_timeout_seconds,
             "last_warning": dict(last_warning) if last_warning else None,
             "last_timeout": dict(last_timeout) if last_timeout else None,

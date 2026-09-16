@@ -18,8 +18,11 @@ def _event_timestamp(row: dict[str, Any]) -> int:
     return int(discord.utils.parse_time(str(row["event_at"])).timestamp())
 
 
+CASE_PREFIXES = {"warning": "W", "timeout": "T", "ban": "B"}
+
+
 def _case_label(row: dict[str, Any]) -> str:
-    prefix = "W" if row["kind"] == "warning" else "T"
+    prefix = CASE_PREFIXES[str(row["kind"])]
     return f"{prefix}-{int(row['id']):04d}"
 
 
@@ -78,7 +81,7 @@ class ModerationHistoryView(discord.ui.View):
         cog: "ModerationCog",
         owner: discord.Member,
         guild: discord.Guild,
-        target: discord.Member,
+        target: discord.abc.User,
         can_edit: bool,
     ):
         super().__init__(timeout=600)
@@ -106,6 +109,7 @@ class ModerationHistoryView(discord.ui.View):
         embed = discord.Embed(title=f"Moderation history — {self.target}")
         embed.add_field(name="Warnings", value=str(summary["warning_count"]), inline=True)
         embed.add_field(name="Timeouts", value=str(summary["timeout_count"]), inline=True)
+        embed.add_field(name="Bans", value=str(summary["ban_count"]), inline=True)
         embed.add_field(
             name="Total timeout issued",
             value=format_duration(summary["total_timeout_seconds"]),
@@ -113,20 +117,24 @@ class ModerationHistoryView(discord.ui.View):
         )
 
         now = discord.utils.utcnow()
-        until = self.target.timed_out_until
-        if until is not None and until > now:
-            embed.add_field(
-                name="Currently timed out",
-                value=f"Yes — until <t:{int(until.timestamp())}:F>",
-                inline=False,
-            )
+        if isinstance(self.target, discord.Member):
+            until = self.target.timed_out_until
+            if until is not None and until > now:
+                embed.add_field(
+                    name="Currently timed out",
+                    value=f"Yes — until <t:{int(until.timestamp())}:F>",
+                    inline=False,
+                )
+            else:
+                embed.add_field(name="Currently timed out", value="No", inline=False)
         else:
-            embed.add_field(name="Currently timed out", value="No", inline=False)
+            # A plain User is not in the server right now (left, kicked or banned).
+            embed.add_field(name="In server", value="No — not currently a member", inline=False)
 
         if not current:
             embed.add_field(
                 name="History",
-                value="No warnings or timeout cases are currently recorded in `/check`.",
+                value="No warning, timeout or ban cases are currently recorded in `/check`.",
                 inline=False,
             )
         else:
@@ -144,6 +152,19 @@ class ModerationHistoryView(discord.ui.View):
                     )
                     embed.add_field(
                         name=f"⚠️ Warning — {label}", value=value, inline=False
+                    )
+                elif row["kind"] == "ban":
+                    value = (
+                        f"**Date:** <t:{ts}:F>\n"
+                        f"**Moderator:** <@{int(row['moderator_id'])}>\n"
+                        f"**Reason:** {reason}"
+                    )
+                    unbanned_at = row.get("unbanned_at")
+                    if unbanned_at:
+                        unban_ts = int(discord.utils.parse_time(str(unbanned_at)).timestamp())
+                        value += f"\n**Unbanned:** <t:{unban_ts}:F>"
+                    embed.add_field(
+                        name=f"🔨 Ban — {label}", value=value, inline=False
                     )
                 else:
                     value = (
@@ -218,7 +239,7 @@ class ModerationHistoryView(discord.ui.View):
         embed = await self.render()
         await interaction.response.edit_message(embed=embed, view=self)
 
-        case = ("W" if kind == "warning" else "T") + f"-{case_id:04d}"
+        case = f"{CASE_PREFIXES[kind]}-{case_id:04d}"
         audit = discord.Embed(
             title="Moderation history entry removed",
             description=str(removed.get("reason") or "No reason recorded"),
@@ -241,7 +262,7 @@ class ClearHistoryConfirmView(discord.ui.View):
         cog: "ModerationCog",
         owner: discord.Member,
         guild: discord.Guild,
-        target: discord.Member,
+        target: discord.abc.User,
     ):
         super().__init__(timeout=60)
         self.cog = cog
@@ -285,7 +306,8 @@ class ClearHistoryConfirmView(discord.ui.View):
         await interaction.response.edit_message(
             content=(
                 f"Cleared {self.target.mention}'s `/check` profile: "
-                f"**{result['warnings']} warning(s)** and **{result['timeouts']} timeout(s)** removed from history.\n"
+                f"**{result['warnings']} warning(s)**, **{result['timeouts']} timeout(s)** and "
+                f"**{result['bans']} ban(s)** removed from history.\n"
                 "The underlying rows are retained internally for audit. An active Discord timeout, if any, is not lifted."
             ),
             embed=None,
@@ -296,6 +318,7 @@ class ClearHistoryConfirmView(discord.ui.View):
         audit.add_field(name="User", value=f"{self.target.mention} (`{self.target.id}`)", inline=False)
         audit.add_field(name="Warnings removed", value=str(result["warnings"]), inline=True)
         audit.add_field(name="Timeouts removed", value=str(result["timeouts"]), inline=True)
+        audit.add_field(name="Bans removed", value=str(result["bans"]), inline=True)
         audit.add_field(name="Cleared by", value=actor.mention, inline=True)
         audit.add_field(
             name="Note",

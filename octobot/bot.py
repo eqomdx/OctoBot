@@ -61,6 +61,7 @@ HELP_DESCRIPTIONS: dict[str, str] = {
 MODERATION_HELP_DESCRIPTIONS: dict[str, str] = {
     "timeout": "Time out a member for an exact duration.",
     "untimeout": "Remove a member's active timeout.",
+    "ban": "Ban a user from the server with a recorded reason.",
     "warn": "Record a warning and DM the member.",
     "warnings": "View a member's recorded warnings.",
     "check": "View a member's complete warning/timeout history and reasons.",
@@ -204,14 +205,14 @@ class OctoBot(commands.Bot):
             profiles.append(RolePermissions(
                 guild_id=guild_id, role_id=self.config.moderator_role_id,
                 can_timeout=True, can_warn=True, can_view_warnings=True,
-                can_check=True, can_untimeout=True, can_manage_settings=True,
+                can_check=True, can_untimeout=True, can_ban=True, can_manage_settings=True,
                 max_timeout_seconds=MAX_TIMEOUT_SECONDS,
             ))
         if self.config.admin_role_id is not None:
             profiles.append(RolePermissions(
                 guild_id=guild_id, role_id=self.config.admin_role_id,
                 can_timeout=True, can_warn=True, can_view_warnings=True,
-                can_check=True, can_untimeout=True, can_manage_settings=True,
+                can_check=True, can_untimeout=True, can_ban=True, can_manage_settings=True,
                 max_timeout_seconds=MAX_TIMEOUT_SECONDS,
             ))
 
@@ -474,6 +475,8 @@ class OctoBot(commands.Bot):
                 visible.append(("timeout", MODERATION_HELP_DESCRIPTIONS["timeout"]))
             if mod_perms.can_untimeout:
                 visible.append(("untimeout", MODERATION_HELP_DESCRIPTIONS["untimeout"]))
+            if mod_perms.can_ban:
+                visible.append(("ban", MODERATION_HELP_DESCRIPTIONS["ban"]))
             if mod_perms.can_warn:
                 visible.append(("warn", MODERATION_HELP_DESCRIPTIONS["warn"]))
             if mod_perms.can_view_warnings:

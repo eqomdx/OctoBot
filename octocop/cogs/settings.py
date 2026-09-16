@@ -19,6 +19,7 @@ PERMISSION_CHOICES = [
     app_commands.Choice(name="View warnings", value="warnings"),
     app_commands.Choice(name="Check moderation history", value="check"),
     app_commands.Choice(name="Remove timeouts", value="untimeout"),
+    app_commands.Choice(name="Ban users", value="ban"),
     app_commands.Choice(name="Manage bot settings", value="settings"),
 ]
 
@@ -92,6 +93,7 @@ class SettingsCog(
             can_view_warnings=True,
             can_check=True,
             can_untimeout=True,
+            can_ban=True,
             can_manage_settings=True,
             max_timeout_seconds=MAX_TIMEOUT_SECONDS,
         )
@@ -107,6 +109,7 @@ class SettingsCog(
                     can_view_warnings=True,
                     can_check=True,
                     can_untimeout=True,
+                    can_ban=True,
                     can_manage_settings=True,
                     max_timeout_seconds=MAX_TIMEOUT_SECONDS,
                 )
@@ -235,6 +238,18 @@ class SettingsCog(
             f"Timeout DMs are now **{'enabled' if enabled else 'disabled'}**.", ephemeral=True
         )
 
+    @app_commands.command(name="dm-bans", description="Enable or disable ban DMs to users.")
+    @app_commands.guild_only()
+    async def dm_bans(self, interaction: discord.Interaction, enabled: bool) -> None:
+        context = await self._require_manage(interaction)
+        if context is None:
+            return
+        _, guild = context
+        await self.bot.moderation_database.set_dm_setting(guild.id, "dm_bans", enabled)
+        await interaction.response.send_message(
+            f"Ban DMs are now **{'enabled' if enabled else 'disabled'}**.", ephemeral=True
+        )
+
     @app_commands.command(name="view", description="View OctoBot permissions configured for a role.")
     @app_commands.describe(role="Role to inspect")
     @app_commands.guild_only()
@@ -261,6 +276,7 @@ class SettingsCog(
         embed.add_field(name="View warnings", value=mark(profile.can_view_warnings), inline=True)
         embed.add_field(name="Check history", value=mark(profile.can_check), inline=True)
         embed.add_field(name="Remove timeouts", value=mark(profile.can_untimeout), inline=True)
+        embed.add_field(name="Ban users", value=mark(profile.can_ban), inline=True)
         embed.add_field(name="Manage settings", value=mark(profile.can_manage_settings), inline=True)
         embed.set_footer(text=f"Role ID: {role.id}")
         await interaction.response.send_message(embed=embed, ephemeral=True)

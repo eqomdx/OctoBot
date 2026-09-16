@@ -1,4 +1,4 @@
-# OctoBot v1.0.4
+# OctoBot v1.0.6
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -17,6 +17,10 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 - `/timeout` with `s`, `m`, `h`, `d`, `w` durations and combined values such as `1h30m`
 - `/untimeout`
   - Removing a timeout early voids that timeout from `/check` history, timeout count, and total timeout time while retaining the audit record.
+- `/ban user reason`
+  - Bans the user (a member or someone who already left) with a required reason. The reason goes to the Discord audit log, the mod log and the user's DM.
+  - The ban is recorded as a `B-####` case in `/check`. It **stays** there after an unban so staff can see it if the user is ever let back in; the unban date is added to the case automatically when the ban is lifted (by anyone, including via Discord's ban list).
+  - Requires the **Ban users** bot permission. Moderator/Admin profiles have it; Helper does not.
 - `/warn`
 - `/warnings`
 - `/history user:@User amount:10`
@@ -26,7 +30,8 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
   - Indexed messages remain visible if later deleted (including timeout cleanup) and are labelled **deleted**, so moderation context is not lost.
   - Uses the same access permission as `/check`, so the default Helper role cannot use it.
 - `/check`
-  - Shows the full active moderation history, including every warning/timeout reason, moderator, timestamp, timeout duration, and cleanup details.
+  - Shows the full active moderation history, including every warning/timeout/ban reason, moderator, timestamp, timeout duration, and cleanup details.
+  - Accepts users who are no longer in the server, so a banned user's record can be reviewed before an unban.
   - Moderators/admins can remove individual history entries directly from the ephemeral `/check` panel using the red ❌ case buttons.
 - `/clearcheck`
   - Clears the user's full `/check`/`/warnings` profile after a confirmation prompt.
@@ -35,7 +40,7 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 - Helper default timeout limit: 1 hour
 - Moderator/Admin default timeout limit: Discord maximum (4 weeks)
 - Optional timeout message cleanup window
-- Warning and timeout DMs
+- Warning, timeout and ban DMs (the DM never names the moderator)
 - Moderation action logs
 
 ## Commands can be used everywhere
@@ -133,3 +138,7 @@ PyNaCl/davey voice warnings are harmless; OctoBot does not use Discord voice.
 ## v1.0.5 message-history ordering
 
 `/history` merges readable channel histories by Discord message ID so fallback scanning is server-wide newest-first rather than channel-by-channel. The selected last X messages are displayed oldest-to-newest with a channel on every entry.
+
+## v1.0.6 bans and anonymous DMs
+
+`/ban user reason` bans a member (or a user who already left) and records a `B-####` case that stays in `/check` even after an unban. The bot watches Discord unban events and stamps the unban date onto the case. A new **Ban users** permission gates the command; existing Moderator/Admin profiles receive it automatically on upgrade, Helper does not. `/settings dm-bans` controls the ban DM. Warning, timeout and ban DMs no longer name the moderator who issued them.

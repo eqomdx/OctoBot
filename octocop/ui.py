@@ -39,6 +39,29 @@ def timeout_embed(
     return embed
 
 
+def ban_embed(
+    *, user: discord.abc.User, moderator_id: int, reason: str, ban_id: int
+) -> discord.Embed:
+    embed = discord.Embed(title="User banned", description=reason)
+    embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
+    embed.add_field(name="Moderator", value=f"<@{moderator_id}>", inline=True)
+    embed.add_field(name="Case", value=f"B-{ban_id:04d}", inline=True)
+    return embed
+
+
+def unban_embed(
+    *, user: discord.abc.User, ban_id: int | None
+) -> discord.Embed:
+    embed = discord.Embed(
+        title="User unbanned",
+        description="The ban was lifted (via Discord). The ban case stays in `/check` history.",
+    )
+    embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
+    if ban_id is not None:
+        embed.add_field(name="Ban case", value=f"B-{ban_id:04d}", inline=True)
+    return embed
+
+
 def untimeout_embed(
     *, user: discord.Member, moderator_id: int, reason: str, timeout_id: int | None
 ) -> discord.Embed:

@@ -11,8 +11,8 @@ from discord.ext import commands
 
 from ..duration import DurationError, format_duration, parse_duration
 from ..history_ui import ClearHistoryConfirmView, ModerationHistoryView
-from ..permissions import moderation_target_error
-from ..ui import timeout_embed, untimeout_embed, warning_embed
+from ..permissions import ban_target_error, moderation_target_error
+from ..ui import ban_embed, timeout_embed, unban_embed, untimeout_embed, warning_embed
 
 if TYPE_CHECKING:
     from octobot.bot import OctoBot
@@ -73,6 +73,23 @@ class ModerationCog(commands.Cog):
         except Exception:
             log.exception("Failed to mark bulk-deleted messages in /history index")
 
+    @commands.Cog.listener()
+    async def on_member_unban(self, guild: discord.Guild, user: discord.User) -> None:
+        """Close the open ban case when a ban is lifted from anywhere (bot or Discord UI).
+
+        The case is kept in /check history on purpose: staff should still see the
+        ban and its reason if the user is ever let back in.
+        """
+        if guild.id != self.bot.config.guild_id:
+            return
+        try:
+            ban_id = await self.bot.moderation_database.mark_latest_ban_unbanned(
+                guild.id, user.id, None, None
+            )
+            await self._log(guild, unban_embed(user=user, ban_id=ban_id))
+        except Exception:
+            log.exception("Failed to record unban for user %s in guild %s", user.id, guild.id)
+
     async def _member_and_guild(
         self, interaction: discord.Interaction
     ) -> tuple[discord.Member, discord.Guild] | None:
@@ -95,7 +112,7 @@ class ModerationCog(commands.Cog):
             log.exception("Failed to send moderation log in guild %s", guild.id)
 
     @staticmethod
-    def _basic_target_error(actor: discord.Member, target: discord.Member) -> str | None:
+    def _basic_target_error(actor: discord.Member, target: discord.abc.User) -> str | None:
         guild = actor.guild
         if actor.id == target.id:
             return "You cannot moderate yourself."
@@ -103,9 +120,11 @@ class ModerationCog(commands.Cog):
             return "The server owner cannot be moderated by this bot."
         if target.bot:
             return "This bot is configured to moderate human members only."
-        if actor.id != guild.owner_id and not actor.guild_permissions.administrator:
-            if actor.top_role <= target.top_role:
-                return "You cannot moderate a member with an equal or higher Discord role than your own."
+        # A plain User is not in the server, so there is no role hierarchy to compare.
+        if isinstance(target, discord.Member):
+            if actor.id != guild.owner_id and not actor.guild_permissions.administrator:
+                if actor.top_role <= target.top_role:
+                    return "You cannot moderate a member with an equal or higher Discord role than your own."
         return None
 
     async def _dm_warning(
@@ -113,7 +132,6 @@ class ModerationCog(commands.Cog):
         *,
         guild: discord.Guild,
         user: discord.Member,
-        moderator: discord.Member,
         reason: str,
         warning_id: int,
     ) -> bool:
@@ -124,7 +142,6 @@ class ModerationCog(commands.Cog):
             title=f"Warning from {guild.name}",
             description=reason,
         )
-        embed.add_field(name="Moderator", value=str(moderator), inline=True)
         embed.add_field(name="Warning", value=f"W-{warning_id:04d}", inline=True)
         try:
             await user.send(embed=embed)
@@ -137,7 +154,6 @@ class ModerationCog(commands.Cog):
         *,
         guild: discord.Guild,
         user: discord.Member,
-        moderator: discord.Member,
         reason: str,
         duration_seconds: int,
         timeout_id: int,
@@ -150,8 +166,29 @@ class ModerationCog(commands.Cog):
             description=reason,
         )
         embed.add_field(name="Duration", value=format_duration(duration_seconds), inline=True)
-        embed.add_field(name="Moderator", value=str(moderator), inline=True)
         embed.add_field(name="Timeout", value=f"T-{timeout_id:04d}", inline=True)
+        try:
+            await user.send(embed=embed)
+            return True
+        except (discord.Forbidden, discord.HTTPException):
+            return False
+
+    async def _dm_ban(
+        self,
+        *,
+        guild: discord.Guild,
+        user: discord.abc.User,
+        reason: str,
+        ban_id: int,
+    ) -> bool:
+        settings = await self.bot.moderation_database.get_guild_settings(guild.id)
+        if not bool(settings["dm_bans"]):
+            return False
+        embed = discord.Embed(
+            title=f"You were banned from {guild.name}",
+            description=reason,
+        )
+        embed.add_field(name="Ban", value=f"B-{ban_id:04d}", inline=True)
         try:
             await user.send(embed=embed)
             return True
@@ -348,7 +385,6 @@ class ModerationCog(commands.Cog):
         dm_sent = await self._dm_timeout(
             guild=guild,
             user=user,
-            moderator=actor,
             reason=reason,
             duration_seconds=seconds,
             timeout_id=timeout_id,
@@ -444,6 +480,92 @@ class ModerationCog(commands.Cog):
             f"Removed {user.mention}'s timeout.{case_text}", ephemeral=True
         )
 
+    @app_commands.command(name="ban", description="Ban a user from the server with a recorded reason.")
+    @app_commands.describe(
+        user="User to ban (may be someone who already left the server)",
+        reason="Reason for the ban",
+    )
+    @app_commands.guild_only()
+    async def ban_command(
+        self, interaction: discord.Interaction, user: discord.User, reason: str
+    ) -> None:
+        context = await self._member_and_guild(interaction)
+        if context is None:
+            return
+        actor, guild = context
+        perms = await self.bot.moderation_permissions.for_member(actor)
+        if not perms.can_ban:
+            await interaction.response.send_message("You do not have permission to use `/ban`.", ephemeral=True)
+            return
+
+        reason = reason.strip()
+        if not reason:
+            await interaction.response.send_message("A reason is required.", ephemeral=True)
+            return
+        if len(reason) > 1000:
+            await interaction.response.send_message("Reason must be 1000 characters or fewer.", ephemeral=True)
+            return
+
+        bot_member = guild.me
+        if bot_member is None:
+            await interaction.response.send_message("I could not resolve my server member record.", ephemeral=True)
+            return
+        target_error = ban_target_error(actor, user, bot_member)
+        if target_error:
+            await interaction.response.send_message(target_error, ephemeral=True)
+            return
+
+        # The DM has to go out before the ban: once banned, the user no longer shares
+        # a server with the bot and Discord refuses the DM.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await guild.fetch_ban(user)
+        except discord.NotFound:
+            pass
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Discord refused to check the ban list. Check that I have **Ban Members**.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as exc:
+            await interaction.followup.send(f"Discord rejected the request: `{exc}`", ephemeral=True)
+            return
+        else:
+            await interaction.followup.send(f"{user.mention} is already banned.", ephemeral=True)
+            return
+
+        ban_id = await self.bot.moderation_database.add_ban(guild.id, user.id, actor.id, reason)
+        dm_sent = await self._dm_ban(guild=guild, user=user, reason=reason, ban_id=ban_id)
+
+        audit_reason = f"OctoBot ban | {actor} ({actor.id}) | {reason}"[:512]
+        try:
+            await guild.ban(user, reason=audit_reason, delete_message_seconds=0)
+        except discord.Forbidden:
+            await self.bot.moderation_database.exclude_history_entry(guild.id, user.id, "ban", ban_id)
+            await interaction.followup.send(
+                "Discord refused the ban. Check that I have **Ban Members** and that my role is above the target user."
+                + (" The user was already DMed about the ban." if dm_sent else ""),
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as exc:
+            await self.bot.moderation_database.exclude_history_entry(guild.id, user.id, "ban", ban_id)
+            await interaction.followup.send(
+                f"Discord rejected the ban: `{exc}`"
+                + (" The user was already DMed about the ban." if dm_sent else ""),
+                ephemeral=True,
+            )
+            return
+
+        embed = ban_embed(user=user, moderator_id=actor.id, reason=reason, ban_id=ban_id)
+        await self._log(guild, embed)
+        dm_note = " DM sent." if dm_sent else " DM was not sent (disabled or unavailable)."
+        await interaction.followup.send(
+            f"Banned {user.mention}. Case `B-{ban_id:04d}`.{dm_note}",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="warn", description="Warn a user and send the warning to them by DM.")
     @app_commands.describe(user="User to warn", reason="Reason for the warning")
     @app_commands.guild_only()
@@ -483,7 +605,6 @@ class ModerationCog(commands.Cog):
             dm_sent = await self._dm_warning(
                 guild=guild,
                 user=user,
-                moderator=actor,
                 reason=reason,
                 warning_id=warning_id,
             )
@@ -799,10 +920,10 @@ class ModerationCog(commands.Cog):
             await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="check", description="Show a user's complete moderation history.")
-    @app_commands.describe(user="User whose moderation history should be checked")
+    @app_commands.describe(user="User whose moderation history should be checked (banned users included)")
     @app_commands.guild_only()
     async def check_command(
-        self, interaction: discord.Interaction, user: discord.Member
+        self, interaction: discord.Interaction, user: discord.User
     ) -> None:
         context = await self._member_and_guild(interaction)
         if context is None:
@@ -836,7 +957,7 @@ class ModerationCog(commands.Cog):
     @app_commands.describe(user="User whose /check profile should be cleared")
     @app_commands.guild_only()
     async def clearcheck_command(
-        self, interaction: discord.Interaction, user: discord.Member
+        self, interaction: discord.Interaction, user: discord.User
     ) -> None:
         context = await self._member_and_guild(interaction)
         if context is None:
@@ -855,7 +976,7 @@ class ModerationCog(commands.Cog):
             return
 
         summary = await self.bot.moderation_database.get_moderation_summary(guild.id, user.id)
-        if summary["warning_count"] == 0 and summary["timeout_count"] == 0:
+        if summary["warning_count"] == 0 and summary["timeout_count"] == 0 and summary["ban_count"] == 0:
             await interaction.response.send_message(
                 f"{user.mention} has no `/check` history to clear.", ephemeral=True
             )
@@ -867,8 +988,9 @@ class ModerationCog(commands.Cog):
         await interaction.response.send_message(
             (
                 f"Clear **all** `/check` history for {user.mention}?\n"
-                f"This will remove **{summary['warning_count']} warning(s)** and "
-                f"**{summary['timeout_count']} timeout(s)** from `/check` and `/warnings`.\n\n"
+                f"This will remove **{summary['warning_count']} warning(s)**, "
+                f"**{summary['timeout_count']} timeout(s)** and **{summary['ban_count']} ban(s)** "
+                f"from `/check` and `/warnings`.\n\n"
                 "This does **not** lift an active Discord timeout. The underlying database rows "
                 "are retained for audit."
             ),
