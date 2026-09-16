@@ -16,6 +16,7 @@ class EffectivePermissions:
     can_check: bool = False
     can_untimeout: bool = False
     can_ban: bool = False
+    can_whisper: bool = False
     can_manage_settings: bool = False
     max_timeout_seconds: int = 0
     source_role_id: int | None = None
@@ -29,6 +30,7 @@ class EffectivePermissions:
             can_check=True,
             can_untimeout=True,
             can_ban=True,
+            can_whisper=True,
             can_manage_settings=True,
             max_timeout_seconds=MAX_TIMEOUT_SECONDS,
         )
@@ -60,6 +62,7 @@ class PermissionService:
             can_check=profile.can_check,
             can_untimeout=profile.can_untimeout,
             can_ban=profile.can_ban,
+            can_whisper=profile.can_whisper,
             can_manage_settings=profile.can_manage_settings,
             max_timeout_seconds=profile.max_timeout_seconds if profile.can_timeout else 0,
             source_role_id=profile.role_id,

@@ -18,7 +18,7 @@ def _event_timestamp(row: dict[str, Any]) -> int:
     return int(discord.utils.parse_time(str(row["event_at"])).timestamp())
 
 
-CASE_PREFIXES = {"warning": "W", "timeout": "T", "ban": "B"}
+CASE_PREFIXES = {"warning": "W", "timeout": "T", "ban": "B", "note": "N"}
 
 
 def _case_label(row: dict[str, Any]) -> str:
@@ -70,6 +70,55 @@ class HistoryPageButton(discord.ui.Button):
         await interaction.response.edit_message(embed=embed, view=view)
 
 
+class PagedEmbedView(discord.ui.View):
+    """Previous/Next over a fixed list of embeds, editing one ephemeral message."""
+
+    def __init__(self, *, owner: discord.Member, pages: list[discord.Embed]):
+        super().__init__(timeout=600)
+        self.owner_id = owner.id
+        self.pages = pages
+        self.page = 0
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self.clear_items()
+        if len(self.pages) <= 1:
+            return
+        self.add_item(PagedEmbedButton(direction=-1, disabled=self.page <= 0))
+        self.add_item(PagedEmbedButton(direction=1, disabled=self.page >= len(self.pages) - 1))
+
+    @property
+    def current(self) -> discord.Embed:
+        return self.pages[self.page]
+
+    async def flip(self, interaction: discord.Interaction, direction: int) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the staff member who opened this panel can use these controls.",
+                ephemeral=True,
+            )
+            return
+        self.page = max(0, min(self.page + direction, len(self.pages) - 1))
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.current, view=self)
+
+
+class PagedEmbedButton(discord.ui.Button):
+    def __init__(self, *, direction: int, disabled: bool):
+        self.direction = direction
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            label="Previous" if direction < 0 else "Next",
+            emoji="◀️" if direction < 0 else "▶️",
+            disabled=disabled,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if isinstance(view, PagedEmbedView):
+            await view.flip(interaction, self.direction)
+
+
 class ModerationHistoryView(discord.ui.View):
     """Paginated /check panel with optional per-case removal controls."""
 
@@ -110,6 +159,7 @@ class ModerationHistoryView(discord.ui.View):
         embed.add_field(name="Warnings", value=str(summary["warning_count"]), inline=True)
         embed.add_field(name="Timeouts", value=str(summary["timeout_count"]), inline=True)
         embed.add_field(name="Bans", value=str(summary["ban_count"]), inline=True)
+        embed.add_field(name="Notes", value=str(summary["note_count"]), inline=True)
         embed.add_field(
             name="Total timeout issued",
             value=format_duration(summary["total_timeout_seconds"]),
@@ -134,7 +184,7 @@ class ModerationHistoryView(discord.ui.View):
         if not current:
             embed.add_field(
                 name="History",
-                value="No warning, timeout or ban cases are currently recorded in `/check`.",
+                value="No warning, timeout, ban or note cases are currently recorded in `/check`.",
                 inline=False,
             )
         else:
@@ -152,6 +202,15 @@ class ModerationHistoryView(discord.ui.View):
                     )
                     embed.add_field(
                         name=f"⚠️ Warning — {label}", value=value, inline=False
+                    )
+                elif row["kind"] == "note":
+                    value = (
+                        f"**Date:** <t:{ts}:F>\n"
+                        f"**Moderator:** <@{int(row['moderator_id'])}>\n"
+                        f"**Note:** {reason}"
+                    )
+                    embed.add_field(
+                        name=f"📝 Note — {label}", value=value, inline=False
                     )
                 elif row["kind"] == "ban":
                     value = (
@@ -306,8 +365,8 @@ class ClearHistoryConfirmView(discord.ui.View):
         await interaction.response.edit_message(
             content=(
                 f"Cleared {self.target.mention}'s `/check` profile: "
-                f"**{result['warnings']} warning(s)**, **{result['timeouts']} timeout(s)** and "
-                f"**{result['bans']} ban(s)** removed from history.\n"
+                f"**{result['warnings']} warning(s)**, **{result['timeouts']} timeout(s)**, "
+                f"**{result['bans']} ban(s)** and **{result['notes']} note(s)** removed from history.\n"
                 "The underlying rows are retained internally for audit. An active Discord timeout, if any, is not lifted."
             ),
             embed=None,
@@ -319,6 +378,7 @@ class ClearHistoryConfirmView(discord.ui.View):
         audit.add_field(name="Warnings removed", value=str(result["warnings"]), inline=True)
         audit.add_field(name="Timeouts removed", value=str(result["timeouts"]), inline=True)
         audit.add_field(name="Bans removed", value=str(result["bans"]), inline=True)
+        audit.add_field(name="Notes removed", value=str(result["notes"]), inline=True)
         audit.add_field(name="Cleared by", value=actor.mention, inline=True)
         audit.add_field(
             name="Note",

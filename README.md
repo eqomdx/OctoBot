@@ -1,4 +1,4 @@
-# OctoBot v1.0.9
+# OctoBot v1.0.10
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -26,7 +26,11 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
   - Bans the user (a member or someone who already left) with a required reason. The reason goes to the Discord audit log, the mod log and the user's DM.
   - The ban is recorded as a `B-####` case in `/check`. It **stays** there after an unban so staff can see it if the user is ever let back in; the unban date is added to the case automatically when the ban is lifted (by anyone, including via Discord's ban list).
   - Requires the **Ban users** bot permission. Moderator/Admin profiles have it; Helper does not.
+- `/whisper user message`
+  - DMs the user as the bot ("Message from <server>"), without naming who sent it. Logged to the mod-log channel with the sender. Requires the **Whisper users** permission (granted to roles that can warn).
 - `/warn`
+- `/note user note`
+  - Like `/warn` but silent: recorded as an `N-####` case in `/check` and the mod log, no DM. Uses the **Warn users** permission. Works for users no longer in the server.
 - `/warnings`
 - `/history user:@User amount:10`
   - Shows a user's most recent messages across all readable server text channels and active threads. `amount` defaults to 10 and supports 1-50.
@@ -42,6 +46,10 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
   - Clears the user's full `/check`/`/warnings` profile after a confirmation prompt.
   - History removal is soft-delete only: database rows remain for audit and an active Discord timeout is not lifted.
 - `/settings ...` moderation configuration
+- Banned-word filter (replaces the Arcane keyword filter): `/word list`, `/word add word`, `/word remove word` (settings permission; replies are visible only to you).
+  - A message containing a banned word is deleted and the author is timed out for 30 seconds (no message-history cleanup). Recorded as a timeout case in `/check`, DMed if timeout DMs are on, and logged to the mod-log channel with the message text.
+  - Matching is whole-word and case-insensitive; phrases are allowed and match with spaces, hyphens or no separator. `/word list` is alphabetical. The Arcane word list is seeded automatically the first time the filter starts with an empty list (`octocop/default_banned_words.py`). Server owner, administrators and anyone with a staff profile are exempt. Edited messages are re-checked.
+  - The bot needs **Manage Messages** in filtered channels and **Moderate Members**.
 - Legacy-role cleanup: a member who gains role `1547371277474603028` automatically loses role `1547037223558451291`. `/rolesweep` (settings permission) does a one-off pass over every member, also treating `1547038342661804194`, `1547038337297154078` and `1547038296025333880` as triggers. Configurable via `ROLE_CLEANUP_*`; needs the **Server Members Intent** enabled in the Developer Portal.
 - Helper default timeout limit: 1 hour
 - Moderator/Admin default timeout limit: Discord maximum (4 weeks)
@@ -162,3 +170,7 @@ The schedule is read as a `start`/`end` date window (`RADIO_SCHEDULE_DAYS`, defa
 ## v1.0.9 legacy-role cleanup
 
 Members who gain role `1547371277474603028` automatically lose role `1547037223558451291`; `/rolesweep` does a one-off pass using the wider trigger list. The bot now requests the Server Members Intent, which must be enabled in the Discord Developer Portal before this version is started.
+
+## v1.0.10 whisper, notes, word filter, /history paging
+
+`/whisper` DMs a user as the bot (new **Whisper users** permission, granted to roles that can warn). `/note` records a silent staff note in `/check`. The banned-word filter replaces the Arcane keyword filter: `/word list|add|remove`, deletion plus a 30-second timeout, seeded with the migrated list on first start. `/history` is now one message with Previous/Next buttons and never exceeds Discord's embed size limit.

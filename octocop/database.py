@@ -21,6 +21,7 @@ class RolePermissions:
     can_check: bool = False
     can_untimeout: bool = False
     can_ban: bool = False
+    can_whisper: bool = False
     can_manage_settings: bool = False
     max_timeout_seconds: int = MAX_TIMEOUT_SECONDS
 
@@ -30,6 +31,7 @@ class Database:
         "warning": "warnings",
         "timeout": "timeouts",
         "ban": "bans",
+        "note": "notes",
     }
     PERMISSION_COLUMNS = {
         "timeout": "can_timeout",
@@ -38,6 +40,7 @@ class Database:
         "check": "can_check",
         "untimeout": "can_untimeout",
         "ban": "can_ban",
+        "whisper": "can_whisper",
         "settings": "can_manage_settings",
     }
 
@@ -85,6 +88,7 @@ class Database:
                 can_check INTEGER NOT NULL DEFAULT 0,
                 can_untimeout INTEGER NOT NULL DEFAULT 0,
                 can_ban INTEGER NOT NULL DEFAULT 0,
+                can_whisper INTEGER NOT NULL DEFAULT 0,
                 can_manage_settings INTEGER NOT NULL DEFAULT 0,
                 max_timeout_seconds INTEGER NOT NULL DEFAULT 2419200,
                 PRIMARY KEY (guild_id, role_id)
@@ -136,6 +140,26 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_bans_guild_user
                 ON bans(guild_id, user_id, created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                moderator_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                excluded_from_history INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_notes_guild_user
+                ON notes(guild_id, user_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS banned_words (
+                guild_id INTEGER NOT NULL,
+                word TEXT NOT NULL,
+                added_by INTEGER NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, word)
+            );
+
             CREATE TABLE IF NOT EXISTS message_history (
                 message_id INTEGER PRIMARY KEY,
                 guild_id INTEGER NOT NULL,
@@ -177,6 +201,14 @@ class Database:
             # access by also receiving /ban. Helper-style profiles stay without it.
             await self.db.execute(
                 "UPDATE role_permissions SET can_ban = 1 WHERE can_manage_settings = 1"
+            )
+        if "can_whisper" not in role_columns:
+            await self.db.execute(
+                "ALTER TABLE role_permissions ADD COLUMN can_whisper INTEGER NOT NULL DEFAULT 0"
+            )
+            # Anyone trusted to /warn (which DMs the user) may also /whisper.
+            await self.db.execute(
+                "UPDATE role_permissions SET can_whisper = 1 WHERE can_warn = 1"
             )
 
         async with self.db.execute("PRAGMA table_info(warnings)") as cur:
@@ -248,8 +280,9 @@ class Database:
             """
             INSERT INTO role_permissions(
                 guild_id, role_id, can_timeout, can_warn, can_view_warnings,
-                can_check, can_untimeout, can_ban, can_manage_settings, max_timeout_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                can_check, can_untimeout, can_ban, can_whisper, can_manage_settings,
+                max_timeout_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, role_id) DO UPDATE SET
                 can_timeout = excluded.can_timeout,
                 can_warn = excluded.can_warn,
@@ -257,6 +290,7 @@ class Database:
                 can_check = excluded.can_check,
                 can_untimeout = excluded.can_untimeout,
                 can_ban = excluded.can_ban,
+                can_whisper = excluded.can_whisper,
                 can_manage_settings = excluded.can_manage_settings,
                 max_timeout_seconds = excluded.max_timeout_seconds
             """,
@@ -269,6 +303,7 @@ class Database:
                 int(profile.can_check),
                 int(profile.can_untimeout),
                 int(profile.can_ban),
+                int(profile.can_whisper),
                 int(profile.can_manage_settings),
                 profile.max_timeout_seconds,
             ),
@@ -339,6 +374,7 @@ class Database:
             can_check=bool(row["can_check"]),
             can_untimeout=bool(row["can_untimeout"]),
             can_ban=bool(row["can_ban"]),
+            can_whisper=bool(row["can_whisper"]),
             can_manage_settings=bool(row["can_manage_settings"]),
             max_timeout_seconds=int(row["max_timeout_seconds"]),
         )
@@ -457,6 +493,49 @@ class Database:
             await self.db.commit()
             return int(cur.lastrowid)
 
+    async def list_banned_words(self, guild_id: int) -> list[str]:
+        async with self.db.execute(
+            "SELECT word FROM banned_words WHERE guild_id = ? ORDER BY word",
+            (guild_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [str(row["word"]) for row in rows]
+
+    async def add_banned_word(self, guild_id: int, word: str, added_by: int) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._lock:
+            cur = await self.db.execute(
+                "INSERT OR IGNORE INTO banned_words(guild_id, word, added_by, added_at) VALUES (?, ?, ?, ?)",
+                (guild_id, word, added_by, now),
+            )
+            await self.db.commit()
+            return cur.rowcount > 0
+
+    async def remove_banned_word(self, guild_id: int, word: str) -> bool:
+        async with self._lock:
+            cur = await self.db.execute(
+                "DELETE FROM banned_words WHERE guild_id = ? AND word = ?",
+                (guild_id, word),
+            )
+            await self.db.commit()
+            return cur.rowcount > 0
+
+    async def add_note(
+        self, guild_id: int, user_id: int, moderator_id: int, note: str
+    ) -> int:
+        """Staff-only note: recorded in /check, never sent to the user."""
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._lock:
+            cur = await self.db.execute(
+                """
+                INSERT INTO notes(guild_id, user_id, moderator_id, reason, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (guild_id, user_id, moderator_id, note, now),
+            )
+            await self.db.commit()
+            return int(cur.lastrowid)
+
     async def mark_latest_ban_unbanned(
         self,
         guild_id: int,
@@ -495,7 +574,7 @@ class Database:
             return ban_id
 
     async def list_moderation_history(self, guild_id: int, user_id: int) -> list[dict[str, Any]]:
-        """Return active /check history, newest first, with warnings, timeouts and bans merged."""
+        """Return active /check history, newest first: warnings, timeouts, bans and notes merged."""
         async with self.db.execute(
             """
             SELECT id, guild_id, user_id, moderator_id, reason, created_at AS event_at,
@@ -515,9 +594,15 @@ class Database:
                    NULL AS messages_deleted, unbanned_at
             FROM bans
             WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0
+            UNION ALL
+            SELECT id, guild_id, user_id, moderator_id, reason, created_at AS event_at,
+                   'note' AS kind, NULL AS duration_seconds, NULL AS cleanup_minutes,
+                   NULL AS messages_deleted, NULL AS unbanned_at
+            FROM notes
+            WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0
             ORDER BY event_at DESC, id DESC
             """,
-            (guild_id, user_id, guild_id, user_id, guild_id, user_id),
+            (guild_id, user_id, guild_id, user_id, guild_id, user_id, guild_id, user_id),
         ) as cur:
             rows = await cur.fetchall()
         return [dict(row) for row in rows]
@@ -525,7 +610,7 @@ class Database:
     async def exclude_history_entry(
         self, guild_id: int, user_id: int, kind: str, case_id: int
     ) -> dict[str, Any] | None:
-        """Soft-remove one warning/timeout/ban from user-facing moderation history."""
+        """Soft-remove one warning/timeout/ban/note from user-facing moderation history."""
         table = self.HISTORY_TABLES.get(kind)
         if table is None:
             raise ValueError("Unknown moderation history kind")
@@ -564,6 +649,11 @@ class Database:
                 (guild_id, user_id),
             ) as cur:
                 ban_count = int((await cur.fetchone())["count"])
+            async with self.db.execute(
+                "SELECT COUNT(*) AS count FROM notes WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
+                (guild_id, user_id),
+            ) as cur:
+                note_count = int((await cur.fetchone())["count"])
             await self.db.execute(
                 "UPDATE warnings SET excluded_from_history = 1 WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
                 (guild_id, user_id),
@@ -576,8 +666,17 @@ class Database:
                 "UPDATE bans SET excluded_from_history = 1 WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
                 (guild_id, user_id),
             )
+            await self.db.execute(
+                "UPDATE notes SET excluded_from_history = 1 WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
+                (guild_id, user_id),
+            )
             await self.db.commit()
-        return {"warnings": warning_count, "timeouts": timeout_count, "bans": ban_count}
+        return {
+            "warnings": warning_count,
+            "timeouts": timeout_count,
+            "bans": ban_count,
+            "notes": note_count,
+        }
 
     async def get_moderation_summary(self, guild_id: int, user_id: int) -> dict[str, Any]:
         async with self.db.execute(
@@ -605,6 +704,12 @@ class Database:
             ban_count = int((await cur.fetchone())["count"])
 
         async with self.db.execute(
+            "SELECT COUNT(*) AS count FROM notes WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0",
+            (guild_id, user_id),
+        ) as cur:
+            note_count = int((await cur.fetchone())["count"])
+
+        async with self.db.execute(
             """
             SELECT * FROM warnings WHERE guild_id = ? AND user_id = ? AND excluded_from_history = 0
             ORDER BY created_at DESC, id DESC LIMIT 1
@@ -627,6 +732,7 @@ class Database:
             "warning_count": warning_count,
             "timeout_count": timeout_count,
             "ban_count": ban_count,
+            "note_count": note_count,
             "total_timeout_seconds": total_timeout_seconds,
             "last_warning": dict(last_warning) if last_warning else None,
             "last_timeout": dict(last_timeout) if last_timeout else None,

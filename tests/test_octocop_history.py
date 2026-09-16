@@ -97,7 +97,7 @@ class ModerationHistoryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 result = await database.clear_moderation_history(123, 456)
-                self.assertEqual(result, {"warnings": 2, "timeouts": 1, "bans": 0})
+                self.assertEqual(result, {"warnings": 2, "timeouts": 1, "bans": 0, "notes": 0})
                 summary = await database.get_moderation_summary(123, 456)
                 self.assertEqual(summary["warning_count"], 0)
                 self.assertEqual(summary["timeout_count"], 0)
@@ -195,9 +195,38 @@ class ModerationHistoryTests(unittest.IsolatedAsyncioTestCase):
                 await database.add_ban(123, 456, 789, "Second ban")
                 await database.add_warning(123, 456, 789, "Warning")
                 result = await database.clear_moderation_history(123, 456)
-                self.assertEqual(result, {"warnings": 1, "timeouts": 0, "bans": 1})
+                self.assertEqual(result, {"warnings": 1, "timeouts": 0, "bans": 1, "notes": 0})
                 async with database.db.execute(
                     "SELECT COUNT(*) AS count FROM bans WHERE guild_id = 123 AND user_id = 456"
+                ) as cur:
+                    self.assertEqual(int((await cur.fetchone())["count"]), 2)
+            finally:
+                await database.close()
+
+    async def test_notes_appear_in_history_and_can_be_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Database(Path(temp_dir) / "octobot.db")
+            await database.connect()
+            try:
+                note_id = await database.add_note(123, 456, 789, "Watch this one")
+                summary = await database.get_moderation_summary(123, 456)
+                self.assertEqual(summary["note_count"], 1)
+                self.assertEqual(summary["warning_count"], 0)
+                history = await database.list_moderation_history(123, 456)
+                self.assertEqual([(row["kind"], row["id"]) for row in history], [("note", note_id)])
+                self.assertEqual(history[0]["reason"], "Watch this one")
+                # Notes never count as warnings for /warnings.
+                self.assertEqual(await database.list_warnings(123, 456), [])
+
+                removed = await database.exclude_history_entry(123, 456, "note", note_id)
+                self.assertEqual(removed["kind"], "note")
+                self.assertEqual((await database.get_moderation_summary(123, 456))["note_count"], 0)
+
+                await database.add_note(123, 456, 789, "Another")
+                result = await database.clear_moderation_history(123, 456)
+                self.assertEqual(result, {"warnings": 0, "timeouts": 0, "bans": 0, "notes": 1})
+                async with database.db.execute(
+                    "SELECT COUNT(*) AS count FROM notes WHERE guild_id = 123 AND user_id = 456"
                 ) as cur:
                     self.assertEqual(int((await cur.fetchone())["count"]), 2)
             finally:
@@ -256,6 +285,8 @@ class ModerationHistoryTests(unittest.IsolatedAsyncioTestCase):
                 moderator = await database.get_role_profile(1, 20)
                 self.assertFalse(helper.can_ban)
                 self.assertTrue(moderator.can_ban)
+                self.assertFalse(helper.can_whisper)
+                self.assertTrue(moderator.can_whisper)
                 settings = await database.get_guild_settings(1)
                 self.assertEqual(settings["dm_bans"], 1)
                 self.assertEqual(await database.add_ban(1, 2, 3, "works"), 1)

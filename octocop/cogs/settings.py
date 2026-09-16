@@ -20,6 +20,7 @@ PERMISSION_CHOICES = [
     app_commands.Choice(name="Check moderation history", value="check"),
     app_commands.Choice(name="Remove timeouts", value="untimeout"),
     app_commands.Choice(name="Ban users", value="ban"),
+    app_commands.Choice(name="Whisper users", value="whisper"),
     app_commands.Choice(name="Manage bot settings", value="settings"),
 ]
 
@@ -94,6 +95,7 @@ class SettingsCog(
             can_check=True,
             can_untimeout=True,
             can_ban=True,
+            can_whisper=True,
             can_manage_settings=True,
             max_timeout_seconds=MAX_TIMEOUT_SECONDS,
         )
@@ -110,6 +112,7 @@ class SettingsCog(
                     can_check=True,
                     can_untimeout=True,
                     can_ban=True,
+                    can_whisper=True,
                     can_manage_settings=True,
                     max_timeout_seconds=MAX_TIMEOUT_SECONDS,
                 )
@@ -277,6 +280,7 @@ class SettingsCog(
         embed.add_field(name="Check history", value=mark(profile.can_check), inline=True)
         embed.add_field(name="Remove timeouts", value=mark(profile.can_untimeout), inline=True)
         embed.add_field(name="Ban users", value=mark(profile.can_ban), inline=True)
+        embed.add_field(name="Whisper users", value=mark(profile.can_whisper), inline=True)
         embed.add_field(name="Manage settings", value=mark(profile.can_manage_settings), inline=True)
         embed.set_footer(text=f"Role ID: {role.id}")
         await interaction.response.send_message(embed=embed, ephemeral=True)

@@ -64,12 +64,15 @@ MODERATION_HELP_DESCRIPTIONS: dict[str, str] = {
     "timeout": "Time out a member for an exact duration.",
     "untimeout": "Remove a member's active timeout.",
     "ban": "Ban a user from the server with a recorded reason.",
+    "whisper": "Send a user a direct message from the bot.",
     "warn": "Record a warning and DM the member.",
+    "note": "Add a staff-only note to a member's /check history.",
     "warnings": "View a member's recorded warnings.",
     "check": "View a member's complete warning/timeout history and reasons.",
     "clearcheck": "Clear a member's recorded /check history.",
     "history": "Show a member's recent server messages.",
     "settings": "Configure OctoBot moderation permissions and behaviour.",
+    "word": "Manage the banned-word filter (list / add / remove).",
     "rolesweep": "One-off: strip the legacy role from members holding a superseding role.",
 }
 
@@ -148,11 +151,13 @@ class OctoBot(commands.Bot):
         from octocop.cogs.moderation import ModerationCog
         from octocop.cogs.roles import RoleCleanupCog
         from octocop.cogs.settings import SettingsCog
+        from octocop.cogs.words import WordFilterCog
 
         # Register moderation commands directly to the configured guild.
         await self.add_cog(ModerationCog(self), guild=self.guild)
         await self.add_cog(SettingsCog(self), guild=self.guild)
         await self.add_cog(RoleCleanupCog(self), guild=self.guild)
+        await self.add_cog(WordFilterCog(self), guild=self.guild)
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_seconds),
             headers={"User-Agent": "OctoBot/1.0 (+OctoWoW Discord bot)"},
@@ -215,14 +220,16 @@ class OctoBot(commands.Bot):
             profiles.append(RolePermissions(
                 guild_id=guild_id, role_id=self.config.moderator_role_id,
                 can_timeout=True, can_warn=True, can_view_warnings=True,
-                can_check=True, can_untimeout=True, can_ban=True, can_manage_settings=True,
+                can_check=True, can_untimeout=True, can_ban=True, can_whisper=True,
+                can_manage_settings=True,
                 max_timeout_seconds=MAX_TIMEOUT_SECONDS,
             ))
         if self.config.admin_role_id is not None:
             profiles.append(RolePermissions(
                 guild_id=guild_id, role_id=self.config.admin_role_id,
                 can_timeout=True, can_warn=True, can_view_warnings=True,
-                can_check=True, can_untimeout=True, can_ban=True, can_manage_settings=True,
+                can_check=True, can_untimeout=True, can_ban=True, can_whisper=True,
+                can_manage_settings=True,
                 max_timeout_seconds=MAX_TIMEOUT_SECONDS,
             ))
 
@@ -513,8 +520,11 @@ class OctoBot(commands.Bot):
                 visible.append(("untimeout", MODERATION_HELP_DESCRIPTIONS["untimeout"]))
             if mod_perms.can_ban:
                 visible.append(("ban", MODERATION_HELP_DESCRIPTIONS["ban"]))
+            if mod_perms.can_whisper:
+                visible.append(("whisper", MODERATION_HELP_DESCRIPTIONS["whisper"]))
             if mod_perms.can_warn:
                 visible.append(("warn", MODERATION_HELP_DESCRIPTIONS["warn"]))
+                visible.append(("note", MODERATION_HELP_DESCRIPTIONS["note"]))
             if mod_perms.can_view_warnings:
                 visible.append(("warnings", MODERATION_HELP_DESCRIPTIONS["warnings"]))
             if mod_perms.can_check:
@@ -523,6 +533,7 @@ class OctoBot(commands.Bot):
             if mod_perms.can_manage_settings:
                 visible.append(("clearcheck", MODERATION_HELP_DESCRIPTIONS["clearcheck"]))
                 visible.append(("settings", MODERATION_HELP_DESCRIPTIONS["settings"]))
+                visible.append(("word", MODERATION_HELP_DESCRIPTIONS["word"]))
                 visible.append(("rolesweep", MODERATION_HELP_DESCRIPTIONS["rolesweep"]))
 
         await interaction.response.send_message(

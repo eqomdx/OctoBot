@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..duration import DurationError, format_duration, parse_duration
-from ..history_ui import ClearHistoryConfirmView, ModerationHistoryView
+from ..history_ui import ClearHistoryConfirmView, ModerationHistoryView, PagedEmbedView
 from ..permissions import ban_target_error, moderation_target_error
 from ..ui import ban_embed, timeout_embed, unban_embed, untimeout_embed, warning_embed
 
@@ -566,6 +566,88 @@ class ModerationCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(name="whisper", description="Send a user a direct message from the bot.")
+    @app_commands.describe(user="User to message", message="What to send them")
+    @app_commands.guild_only()
+    async def whisper_command(
+        self, interaction: discord.Interaction, user: discord.Member, message: str
+    ) -> None:
+        context = await self._member_and_guild(interaction)
+        if context is None:
+            return
+        actor, guild = context
+        perms = await self.bot.moderation_permissions.for_member(actor)
+        if not perms.can_whisper:
+            await interaction.response.send_message("You do not have permission to use `/whisper`.", ephemeral=True)
+            return
+
+        message = message.strip()
+        if not message:
+            await interaction.response.send_message("A message is required.", ephemeral=True)
+            return
+        if len(message) > 2000:
+            await interaction.response.send_message("Message must be 2000 characters or fewer.", ephemeral=True)
+            return
+        if user.bot:
+            await interaction.response.send_message("Bots cannot receive DMs.", ephemeral=True)
+            return
+
+        embed = discord.Embed(title=f"Message from {guild.name}", description=message)
+        try:
+            await user.send(embed=embed)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"{user.mention} has DMs closed or has blocked the bot; nothing was sent.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(f"Discord rejected the DM: `{exc}`", ephemeral=True)
+            return
+
+        audit = discord.Embed(title="Whisper sent", description=message)
+        audit.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
+        audit.add_field(name="Moderator", value=actor.mention, inline=True)
+        await self._log(guild, audit)
+        await interaction.response.send_message(f"Sent to {user.mention}.", ephemeral=True)
+
+    @app_commands.command(name="note", description="Add a staff-only note to a user's /check history.")
+    @app_commands.describe(user="User the note is about", note="The note (the user is not notified)")
+    @app_commands.guild_only()
+    async def note_command(
+        self, interaction: discord.Interaction, user: discord.User, note: str
+    ) -> None:
+        context = await self._member_and_guild(interaction)
+        if context is None:
+            return
+        actor, guild = context
+        perms = await self.bot.moderation_permissions.for_member(actor)
+        if not perms.can_warn:
+            await interaction.response.send_message("You do not have permission to use `/note`.", ephemeral=True)
+            return
+
+        note = note.strip()
+        if not note:
+            await interaction.response.send_message("A note is required.", ephemeral=True)
+            return
+        if len(note) > 1000:
+            await interaction.response.send_message("Note must be 1000 characters or fewer.", ephemeral=True)
+            return
+        if user.id == actor.id:
+            await interaction.response.send_message("You cannot add a note about yourself.", ephemeral=True)
+            return
+
+        note_id = await self.bot.moderation_database.add_note(guild.id, user.id, actor.id, note)
+        audit = discord.Embed(title="Note added", description=note)
+        audit.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
+        audit.add_field(name="Moderator", value=actor.mention, inline=True)
+        audit.add_field(name="Case", value=f"N-{note_id:04d}", inline=True)
+        await self._log(guild, audit)
+        await interaction.response.send_message(
+            f"Note added to {user.mention}'s `/check` history. Case `N-{note_id:04d}`. They were not notified.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="warn", description="Warn a user and send the warning to them by DM.")
     @app_commands.describe(user="User to warn", reason="Reason for the warning")
     @app_commands.guild_only()
@@ -744,45 +826,56 @@ class ModerationCog(commands.Cog):
         # those selected messages oldest-to-newest, ending with the user's most recent.
         ordered_messages = list(reversed(messages))
         per_page = 10
+        # Discord rejects embeds over 6000 characters in total; long messages can hit
+        # that well before 10 fields, so pages are packed by size as well as count.
+        char_budget = 5600
+        fields: list[tuple[str, str]] = []
+        for global_index, row in enumerate(ordered_messages):
+            position_from_newest = len(ordered_messages) - global_index
+            created = discord.utils.parse_time(str(row["created_at"]))
+            ts = int(created.timestamp()) if created is not None else 0
+            content = str(row.get("content") or "").strip()
+            attachment_count = int(row.get("attachment_count") or 0)
+            if not content:
+                content = (
+                    f"*[Attachment-only message — {attachment_count} attachment(s)]*"
+                    if attachment_count
+                    else "*[No text content]*"
+                )
+            if len(content) > 850:
+                content = content[:847] + "..."
+            message_id = int(row["message_id"])
+            channel_id = int(row["channel_id"])
+            jump_url = f"https://discord.com/channels/{guild.id}/{channel_id}/{message_id}"
+            edited_note = " • edited" if row.get("edited_at") else ""
+            deleted_note = " • **deleted**" if row.get("deleted_at") else ""
+            location = f"<t:{ts}:R>{edited_note}{deleted_note}"
+            if not row.get("deleted_at"):
+                location += f" • [Jump to message]({jump_url})"
+            value = f"{content}\n{location}"
+            recency = self._recency_label(position_from_newest)
+            fields.append((f"{recency} • <#{channel_id}>", value))
+
+        chunks: list[list[tuple[str, str]]] = [[]]
+        used = 0
+        for name, value in fields:
+            size = len(name) + len(value)
+            if chunks[-1] and (len(chunks[-1]) >= per_page or used + size > char_budget):
+                chunks.append([])
+                used = 0
+            chunks[-1].append((name, value))
+            used += size
+
         pages: list[discord.Embed] = []
-        total_pages = (len(ordered_messages) + per_page - 1) // per_page
-        for page_index in range(total_pages):
-            start_index = page_index * per_page
-            chunk = ordered_messages[start_index : start_index + per_page]
+        for page_index, chunk in enumerate(chunks):
             embed = discord.Embed(
                 title=f"Message history — {user}",
                 description=f"Showing **{len(messages)}** most recent indexed message(s).",
             )
-            for local_index, row in enumerate(chunk):
-                global_index = start_index + local_index
-                position_from_newest = len(ordered_messages) - global_index
-                created = discord.utils.parse_time(str(row["created_at"]))
-                ts = int(created.timestamp()) if created is not None else 0
-                content = str(row.get("content") or "").strip()
-                attachment_count = int(row.get("attachment_count") or 0)
-                if not content:
-                    content = (
-                        f"*[Attachment-only message — {attachment_count} attachment(s)]*"
-                        if attachment_count
-                        else "*[No text content]*"
-                    )
-                if len(content) > 850:
-                    content = content[:847] + "..."
-                message_id = int(row["message_id"])
-                channel_id = int(row["channel_id"])
-                jump_url = f"https://discord.com/channels/{guild.id}/{channel_id}/{message_id}"
-                edited_note = " • edited" if row.get("edited_at") else ""
-                deleted_note = " • **deleted**" if row.get("deleted_at") else ""
-                location = f"<t:{ts}:R>{edited_note}{deleted_note}"
-                if not row.get("deleted_at"):
-                    location += f" • [Jump to message]({jump_url})"
-                value = f"{content}\n{location}"
-                recency = self._recency_label(position_from_newest)
-                embed.add_field(
-                    name=f"{recency} • <#{channel_id}>", value=value, inline=False
-                )
+            for name, value in chunk:
+                embed.add_field(name=name, value=value, inline=False)
             embed.set_footer(
-                text=f"Page {page_index + 1}/{total_pages} • User ID: {user.id}"
+                text=f"Page {page_index + 1}/{len(chunks)} • User ID: {user.id}"
             )
             pages.append(embed)
         return pages
@@ -915,9 +1008,8 @@ class ModerationCog(commands.Cog):
         if scan_note:
             description = embeds[0].description or ""
             embeds[0].description = description + scan_note
-        await interaction.followup.send(embed=embeds[0], ephemeral=True)
-        for embed in embeds[1:]:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        view = PagedEmbedView(owner=actor, pages=embeds)
+        await interaction.followup.send(embed=view.current, view=view, ephemeral=True)
 
     @app_commands.command(name="check", description="Show a user's complete moderation history.")
     @app_commands.describe(user="User whose moderation history should be checked (banned users included)")
@@ -976,7 +1068,7 @@ class ModerationCog(commands.Cog):
             return
 
         summary = await self.bot.moderation_database.get_moderation_summary(guild.id, user.id)
-        if summary["warning_count"] == 0 and summary["timeout_count"] == 0 and summary["ban_count"] == 0:
+        if not any(summary[key] for key in ("warning_count", "timeout_count", "ban_count", "note_count")):
             await interaction.response.send_message(
                 f"{user.mention} has no `/check` history to clear.", ephemeral=True
             )
@@ -989,8 +1081,8 @@ class ModerationCog(commands.Cog):
             (
                 f"Clear **all** `/check` history for {user.mention}?\n"
                 f"This will remove **{summary['warning_count']} warning(s)**, "
-                f"**{summary['timeout_count']} timeout(s)** and **{summary['ban_count']} ban(s)** "
-                f"from `/check` and `/warnings`.\n\n"
+                f"**{summary['timeout_count']} timeout(s)**, **{summary['ban_count']} ban(s)** "
+                f"and **{summary['note_count']} note(s)** from `/check` and `/warnings`.\n\n"
                 "This does **not** lift an active Discord timeout. The underlying database rows "
                 "are retained for audit."
             ),
