@@ -1,4 +1,4 @@
-# OctoBot v1.0.10
+# OctoBot v1.0.11
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -41,7 +41,7 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 - `/check`
   - Shows the full active moderation history, including every warning/timeout/ban reason, moderator, timestamp, timeout duration, and cleanup details.
   - Accepts users who are no longer in the server, so a banned user's record can be reviewed before an unban.
-  - Moderators/admins can remove individual history entries directly from the ephemeral `/check` panel using the red ❌ case buttons.
+  - `/check user remove:W-0003` removes one case from history (settings permission). Case IDs are shown on every entry.
 - `/clearcheck`
   - Clears the user's full `/check`/`/warnings` profile after a confirmation prompt.
   - History removal is soft-delete only: database rows remain for audit and an active Discord timeout is not lifted.
@@ -174,3 +174,7 @@ Members who gain role `1547371277474603028` automatically lose role `15470372235
 ## v1.0.10 whisper, notes, word filter, /history paging
 
 `/whisper` DMs a user as the bot (new **Whisper users** permission, granted to roles that can warn). `/note` records a silent staff note in `/check`. The banned-word filter replaces the Arcane keyword filter: `/word list|add|remove`, deletion plus a 30-second timeout, seeded with the migrated list on first start. `/history` is now one message with Previous/Next buttons and never exceeds Discord's embed size limit.
+
+## v1.0.11 /check remove parameter, command guide
+
+`/check user remove:W-0003` replaces the per-case ❌ buttons. `COMMANDS.md` documents every command by tier (Everyone, Helper+, Mod+, Admin only).

@@ -10,7 +10,13 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..duration import DurationError, format_duration, parse_duration
-from ..history_ui import ClearHistoryConfirmView, ModerationHistoryView, PagedEmbedView
+from ..history_ui import (
+    CASE_PREFIXES,
+    ClearHistoryConfirmView,
+    ModerationHistoryView,
+    PagedEmbedView,
+    parse_case_id,
+)
 from ..permissions import ban_target_error, moderation_target_error
 from ..ui import ban_embed, timeout_embed, unban_embed, untimeout_embed, warning_embed
 
@@ -1012,10 +1018,13 @@ class ModerationCog(commands.Cog):
         await interaction.followup.send(embed=view.current, view=view, ephemeral=True)
 
     @app_commands.command(name="check", description="Show a user's complete moderation history.")
-    @app_commands.describe(user="User whose moderation history should be checked (banned users included)")
+    @app_commands.describe(
+        user="User whose moderation history should be checked (banned users included)",
+        remove="Optional case to remove from history, e.g. W-0003 or T-0012",
+    )
     @app_commands.guild_only()
     async def check_command(
-        self, interaction: discord.Interaction, user: discord.User
+        self, interaction: discord.Interaction, user: discord.User, remove: str | None = None
     ) -> None:
         context = await self._member_and_guild(interaction)
         if context is None:
@@ -1028,19 +1037,56 @@ class ModerationCog(commands.Cog):
             )
             return
 
-        # Viewing history and editing history are deliberately separate. Moderators/admins
-        # seeded by OctoBot have can_manage_settings, while a role granted view-only
-        # /check access cannot erase cases.
-        can_edit = bool(perms.can_manage_settings) and self._basic_target_error(actor, user) is None
-        view = ModerationHistoryView(
-            cog=self,
-            owner=actor,
-            guild=guild,
-            target=user,
-            can_edit=can_edit,
-        )
+        removed_note = ""
+        if remove is not None:
+            # Viewing and editing history are deliberately separate: a role granted
+            # view-only /check access cannot erase cases.
+            if not perms.can_manage_settings:
+                await interaction.response.send_message(
+                    "You do not have permission to remove moderation history entries.", ephemeral=True
+                )
+                return
+            target_error = self._basic_target_error(actor, user)
+            if target_error:
+                await interaction.response.send_message(target_error, ephemeral=True)
+                return
+            parsed = parse_case_id(remove)
+            if parsed is None:
+                await interaction.response.send_message(
+                    "Case IDs look like `W-0003`, `T-0012`, `B-0001` or `N-0002`.", ephemeral=True
+                )
+                return
+            kind, case_id = parsed
+            case = f"{CASE_PREFIXES[kind]}-{case_id:04d}"
+            removed = await self.bot.moderation_database.exclude_history_entry(
+                guild.id, user.id, kind, case_id
+            )
+            if removed is None:
+                await interaction.response.send_message(
+                    f"`{case}` is not in {user.mention}'s `/check` history (wrong user, or already removed).",
+                    ephemeral=True,
+                )
+                return
+            audit = discord.Embed(
+                title="Moderation history entry removed",
+                description=str(removed.get("reason") or "No reason recorded"),
+            )
+            audit.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
+            audit.add_field(name="Removed case", value=case, inline=True)
+            audit.add_field(name="Removed by", value=actor.mention, inline=True)
+            audit.add_field(
+                name="Note",
+                value="The database row was retained for audit, but this case no longer counts in `/check` or `/warnings`.",
+                inline=False,
+            )
+            await self._log(guild, audit)
+            removed_note = f"Removed `{case}` from {user.mention}'s history.\n"
+
+        view = ModerationHistoryView(cog=self, owner=actor, guild=guild, target=user)
         embed = await view.render()
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(
+            content=removed_note or None, embed=embed, view=view, ephemeral=True
+        )
 
     @app_commands.command(
         name="clearcheck",

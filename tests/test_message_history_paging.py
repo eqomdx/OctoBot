@@ -62,5 +62,19 @@ class MessageHistoryPagingTests(unittest.TestCase):
         self.assertIs(view.current, two[0])
 
 
+
+class CaseIdParsingTests(unittest.TestCase):
+    def test_accepts_the_shown_format_and_lenient_variants(self) -> None:
+        from octocop.history_ui import parse_case_id
+        self.assertEqual(parse_case_id("W-0003"), ("warning", 3))
+        self.assertEqual(parse_case_id("t-0012"), ("timeout", 12))
+        self.assertEqual(parse_case_id("B1"), ("ban", 1))
+        self.assertEqual(parse_case_id(" n 7 "), ("note", 7))
+        self.assertIsNone(parse_case_id("X-0001"))
+        self.assertIsNone(parse_case_id("0003"))
+        self.assertIsNone(parse_case_id("W-"))
+        self.assertIsNone(parse_case_id(""))
+
+
 if __name__ == "__main__":
     unittest.main()

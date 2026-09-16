@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
@@ -19,29 +20,20 @@ def _event_timestamp(row: dict[str, Any]) -> int:
 
 
 CASE_PREFIXES = {"warning": "W", "timeout": "T", "ban": "B", "note": "N"}
+KINDS_BY_PREFIX = {prefix: kind for kind, prefix in CASE_PREFIXES.items()}
+
+
+def parse_case_id(value: str) -> tuple[str, int] | None:
+    """Turn "W-0003", "t12" or "B 7" into ("warning", 3) etc. None if malformed."""
+    match = re.fullmatch(r"\s*([WTBNwtbn])\s*-?\s*0*(\d{1,9})\s*", value or "")
+    if match is None:
+        return None
+    return KINDS_BY_PREFIX[match.group(1).upper()], int(match.group(2))
 
 
 def _case_label(row: dict[str, Any]) -> str:
     prefix = CASE_PREFIXES[str(row["kind"])]
     return f"{prefix}-{int(row['id']):04d}"
-
-
-class HistoryCaseButton(discord.ui.Button):
-    def __init__(self, row: dict[str, Any]):
-        self.case_kind = str(row["kind"])
-        self.case_id = int(row["id"])
-        super().__init__(
-            style=discord.ButtonStyle.danger,
-            label=_case_label(row),
-            emoji="❌",
-            row=0,
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        view = self.view
-        if view is None:
-            return
-        await view.remove_case(interaction, self.case_kind, self.case_id)
 
 
 class HistoryPageButton(discord.ui.Button):
@@ -120,7 +112,7 @@ class PagedEmbedButton(discord.ui.Button):
 
 
 class ModerationHistoryView(discord.ui.View):
-    """Paginated /check panel with optional per-case removal controls."""
+    """Paginated /check panel. Cases are removed with `/check user remove:<case>`."""
 
     PER_PAGE = 5
 
@@ -131,7 +123,6 @@ class ModerationHistoryView(discord.ui.View):
         owner: discord.Member,
         guild: discord.Guild,
         target: discord.abc.User,
-        can_edit: bool,
     ):
         super().__init__(timeout=600)
         self.cog = cog
@@ -139,7 +130,6 @@ class ModerationHistoryView(discord.ui.View):
         self.owner_id = owner.id
         self.guild = guild
         self.target = target
-        self.can_edit = can_edit
         self.page = 0
         self._history: list[dict[str, Any]] = []
 
@@ -243,9 +233,6 @@ class ModerationHistoryView(discord.ui.View):
                     )
 
         self.clear_items()
-        if self.can_edit:
-            for row in current:
-                self.add_item(HistoryCaseButton(row))
         if total_pages > 1:
             self.add_item(
                 HistoryPageButton(direction=-1, disabled=self.page <= 0)
@@ -255,63 +242,10 @@ class ModerationHistoryView(discord.ui.View):
             )
 
         footer = f"Page {self.page + 1}/{total_pages} • User ID: {self.target.id}"
-        if self.can_edit and current:
-            footer += " • Red ❌ removes that case from /check history"
+        if current:
+            footer += " • /check user remove:<case> removes a case"
         embed.set_footer(text=footer)
         return embed
-
-    async def remove_case(
-        self, interaction: discord.Interaction, kind: str, case_id: int
-    ) -> None:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "Only the staff member who opened this panel can use these controls.",
-                ephemeral=True,
-            )
-            return
-        if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("This control only works in a server.", ephemeral=True)
-            return
-
-        perms = await self.bot.moderation_permissions.for_member(interaction.user)
-        if not perms.can_manage_settings:
-            await interaction.response.send_message(
-                "You do not have permission to remove moderation history entries.",
-                ephemeral=True,
-            )
-            return
-        target_error = self.cog._basic_target_error(interaction.user, self.target)
-        if target_error:
-            await interaction.response.send_message(target_error, ephemeral=True)
-            return
-
-        removed = await self.bot.moderation_database.exclude_history_entry(
-            self.guild.id, self.target.id, kind, case_id
-        )
-        if removed is None:
-            await interaction.response.send_message(
-                "That case is already gone from this user's `/check` history.",
-                ephemeral=True,
-            )
-            return
-
-        embed = await self.render()
-        await interaction.response.edit_message(embed=embed, view=self)
-
-        case = f"{CASE_PREFIXES[kind]}-{case_id:04d}"
-        audit = discord.Embed(
-            title="Moderation history entry removed",
-            description=str(removed.get("reason") or "No reason recorded"),
-        )
-        audit.add_field(name="User", value=f"{self.target.mention} (`{self.target.id}`)", inline=False)
-        audit.add_field(name="Removed case", value=case, inline=True)
-        audit.add_field(name="Removed by", value=interaction.user.mention, inline=True)
-        audit.add_field(
-            name="Note",
-            value="The database row was retained for audit, but this case no longer counts in `/check` or `/warnings`.",
-            inline=False,
-        )
-        await self.cog._log(self.guild, audit)
 
 
 class ClearHistoryConfirmView(discord.ui.View):
