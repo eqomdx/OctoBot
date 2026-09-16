@@ -220,6 +220,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "config",
                 "help",
                 "incidents",
+                "nextshows",
                 "radio",
                 "report",
                 "reports",

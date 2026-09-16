@@ -1,4 +1,4 @@
-# OctoBot v1.0.6
+# OctoBot v1.0.7
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -11,6 +11,10 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 - Official announcement monitoring and `/announcement`
 - Community `/report`, `/reports`, moderator report tools
 - Booty Bay Pirate Radio monitoring and `/radio`
+- `/nextshows` lists every upcoming scheduled show with absolute (`<t:…:f>`) and relative (`<t:…:R>`) Discord timestamps plus the DJ's Twitch link; same access rule as `/radio`.
+  - Each scheduled show is pinged to `DISCORD_RADIO_PING_ROLE_ID` in `DISCORD_RADIO_CHANNEL_ID` at its scheduled start time, naming the DJ from the station schedule. One ping per show; a start missed while the bot was down is still announced if the show is under 10 minutes in.
+  - `RADIO_LIVE_ALERTS=true` additionally pings when a DJ goes live outside the schedule.
+  - The ping lists three ways to listen: in-game radio, the radio website, and the live DJ's own Twitch stream (Whiski, Mossa, Tekeela, Sabellwind are built in; `RADIO_DJ_STREAMS` overrides the table).
 - Tracker command role configuration under `/config command-role`
 
 ### OctoCop moderation
@@ -142,3 +146,9 @@ PyNaCl/davey voice warnings are harmless; OctoBot does not use Discord voice.
 ## v1.0.6 bans and anonymous DMs
 
 `/ban user reason` bans a member (or a user who already left) and records a `B-####` case that stays in `/check` even after an unban. The bot watches Discord unban events and stamps the unban date onto the case. A new **Ban users** permission gates the command; existing Moderator/Admin profiles receive it automatically on upgrade, Helper does not. `/settings dm-bans` controls the ban DM. Warning, timeout and ban DMs no longer name the moderator who issued them.
+
+## v1.0.7 schedule-driven radio pings, Twitch links, /nextshows
+
+Radio pings are now driven by the station schedule: the next show's DJ and start time are read from `/api/station/.../schedule` and the role is pinged when that time arrives, whether or not the DJ has connected yet. Live-detection pings caused duplicate announcements (early connects and stream dropouts each produced a fresh "now live") and are now opt-in via `RADIO_LIVE_ALERTS`; when enabled they never repeat a slot already announced from the schedule.
+
+The ping links the radio website and the live DJ's Twitch stream (Whiski, Mossa, Tekeela, Sabellwind built in; `RADIO_DJ_STREAMS` overrides). `/nextshows` lists every upcoming show with absolute and relative Discord timestamps.

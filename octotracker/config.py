@@ -93,6 +93,11 @@ class Config:
     radio_ping_role_id: int | None = None
     radio_poll_seconds: int = 30
     radio_go_live_confirmations: int = 2
+    # Scheduled shows are announced at their scheduled start. Live-detection alerts
+    # (pinging whenever a DJ connects) are opt-in because they double up with those.
+    radio_live_alerts: bool = False
+    # Optional "Name=url,Name=url" override of the built-in DJ Twitch table.
+    radio_dj_streams: str | None = None
     bot_commands_channel_id: int | None = None
     log_channel_id: int | None = None
     helper_role_id: int | None = None
@@ -164,6 +169,8 @@ class Config:
             radio_go_live_confirmations=_positive_int(
                 "RADIO_GO_LIVE_CONFIRMATIONS", 2
             ),
+            radio_live_alerts=_boolean("RADIO_LIVE_ALERTS", False),
+            radio_dj_streams=(os.getenv("RADIO_DJ_STREAMS", "").strip() or None),
             # Kept only for backward compatibility with older OctoTracker .env files.
             # OctoBot commands are intentionally usable in every accessible channel.
             bot_commands_channel_id=_discord_id(

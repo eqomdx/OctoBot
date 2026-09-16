@@ -1,3 +1,3 @@
 """OctoBot: OctoWoW monitoring + Discord moderation."""
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"

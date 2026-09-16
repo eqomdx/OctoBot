@@ -17,6 +17,7 @@ from octotracker.embeds import (
     announcement_embeds,
     authcheck_embed,
     help_embed,
+    next_shows_embeds,
     incidents_embed,
     radio_status_embed,
     reports_details_embed,
@@ -56,6 +57,7 @@ HELP_DESCRIPTIONS: dict[str, str] = {
     "report": "Report a current connection problem.",
     "reports": "View recent community connection reports.",
     "radio": "View Booty Bay Pirate Radio and upcoming shows.",
+    "nextshows": "List every upcoming Booty Bay Pirate Radio show with times.",
 }
 
 MODERATION_HELP_DESCRIPTIONS: dict[str, str] = {
@@ -102,6 +104,7 @@ class OctoBot(commands.Bot):
             ("reports-details", "Show detailed current reports for moderators.", self.reports_details_command),
             ("reports-clear", "Clear current community reports.", self.reports_clear_command),
             ("radio", "Show Booty Bay Pirate Radio status and upcoming shows.", self.radio_command),
+            ("nextshows", "List all upcoming Booty Bay Pirate Radio shows.", self.nextshows_command),
             ("help", "Explain the OctoBot commands you can use.", self.help_slash_command),
             (
                 "authcheck",
@@ -455,12 +458,38 @@ class OctoBot(commands.Bot):
                 ephemeral=True,
             )
 
+    async def nextshows_command(self, interaction: discord.Interaction) -> None:
+        # Same access rule as /radio: one "radio" entry in /config command-role covers both.
+        if not await self._require_command_access(interaction, "radio"):
+            return
+        if not self.config.radio_enabled:
+            await interaction.response.send_message(
+                "Booty Bay Pirate Radio tracking is currently disabled.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            monitor = self._radio_monitor()
+            snapshot = await monitor.fetch_current()
+            embeds = next_shows_embeds(snapshot, monitor.dj_streams)
+            await interaction.followup.send(embed=embeds[0])
+            for embed in embeds[1:]:
+                await interaction.followup.send(embed=embed)
+        except Exception:
+            LOGGER.exception("The /nextshows command failed")
+            await interaction.followup.send(
+                "OctoBot could not read the Booty Bay Pirate Radio schedule right now.",
+                ephemeral=True,
+            )
+
     async def help_slash_command(self, interaction: discord.Interaction) -> None:
         command_channel = "any channel where OctoBot can respond"
         visible: list[tuple[str, str]] = []
         for command_name in MANAGED_COMMANDS:
             if await self._has_command_access(interaction, command_name):
                 visible.append((command_name, HELP_DESCRIPTIONS[command_name]))
+                if command_name == "radio":
+                    visible.append(("nextshows", HELP_DESCRIPTIONS["nextshows"]))
 
         if self._is_moderator(interaction):
             visible.append(("reports-details", "View individual active report details."))

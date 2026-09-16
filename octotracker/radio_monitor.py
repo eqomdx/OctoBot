@@ -3,32 +3,54 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from datetime import timedelta
 
 import discord
 
 from .config import Config
 from .database import Database, RadioOccurrence
 from .embeds import radio_live_embed
-from .radio import LIVE, RadioClient, RadioSnapshot
+from .radio import (
+    DJ_TWITCH_STREAMS,
+    LIVE,
+    RadioClient,
+    RadioShow,
+    RadioSnapshot,
+    dj_stream_url,
+    parse_dj_streams,
+)
 
 
 LOGGER = logging.getLogger(__name__)
 RADIO_LISTEN_URL = (
     "https://radio.octowow.st/public/booty_bay_pirate_radio"
 )
+# A scheduled show is announced once its start time has passed. If the bot was down
+# at that moment it still announces on the next poll, but not once the show is this
+# far in: a late ping is worse than none.
+SCHEDULE_ANNOUNCE_GRACE = timedelta(minutes=10)
 
 
 def radio_notification_message(
-    dj_name: str, role_id: int | None, listen_url: str = RADIO_LISTEN_URL
+    dj_name: str,
+    role_id: int | None,
+    listen_url: str = RADIO_LISTEN_URL,
+    twitch_url: str | None = None,
 ) -> str:
     audience = f"<@&{role_id}> " if role_id is not None else ""
+    website = f"[Radio Website]({listen_url})"
+    ways = (
+        f"Tune in through the in-game radio, the {website}, "
+        f"or directly on their [Twitch Stream]({twitch_url})!"
+        if twitch_url
+        else f"Tune in through the in-game radio or the {website}!"
+    )
     return (
         f"GREETINGS, ALL YE {audience}LISTENERS!\n"
         "YARRR! This be the Booty Bay Pirate Radio Announcement Service, "
         f"lettin’ all ye landlubbers know that {dj_name} has just gone LIVE "
         "on the airwaves!\n"
-        "Tune in through the in-game radio, or listen directly here:\n"
-        f"[{listen_url}]({listen_url})\n"
+        f"{ways}\n"
         "Raise the sails, turn it up, and enjoy the show! ☠️📻"
     )
 
@@ -47,6 +69,11 @@ class RadioMonitor:
         self.client = client
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self.dj_streams = (
+            parse_dj_streams(config.radio_dj_streams)
+            if config.radio_dj_streams
+            else dict(DJ_TWITCH_STREAMS)
+        )
 
     def start(self) -> None:
         if self._task is not None:
@@ -84,11 +111,14 @@ class RadioMonitor:
             state, _ = await self.database.apply_radio_snapshot(
                 snapshot, self.config.radio_go_live_confirmations
             )
+            if snapshot.source_ok and snapshot.schedule_available:
+                await self._announce_scheduled_shows(snapshot)
             # Never deliver a stale "now live" alert after the source has already
             # moved back to AutoDJ/offline. Only the currently confirmed live
             # occurrence is eligible for delivery.
             if (
-                snapshot.source_ok
+                self.config.radio_live_alerts
+                and snapshot.source_ok
                 and snapshot.is_live
                 and state.current_state == LIVE
                 and state.current_occurrence_key is not None
@@ -98,6 +128,62 @@ class RadioMonitor:
                 )
             return snapshot
 
+    def _due_scheduled_shows(self, snapshot: RadioSnapshot) -> list[RadioShow]:
+        """Scheduled shows whose start time has just passed and are not too far in."""
+        now = snapshot.checked_at
+        due = []
+        for show in snapshot.schedule:
+            if show.occurrence_key is None or show.scheduled_start is None:
+                continue
+            if show.scheduled_start > now:
+                continue
+            if now - show.scheduled_start > SCHEDULE_ANNOUNCE_GRACE:
+                continue
+            if show.scheduled_end is not None and now >= show.scheduled_end:
+                continue
+            due.append(show)
+        return due
+
+    async def _announce_scheduled_shows(self, snapshot: RadioSnapshot) -> None:
+        channel_id = self.config.radio_channel_id
+        if channel_id is None:
+            return
+        due = self._due_scheduled_shows(snapshot)
+        if not due:
+            return
+        station = self.config.radio_station_shortcode
+        already = await self.database.announced_radio_schedule_keys(
+            station, (show.occurrence_key for show in due)
+        )
+        for show in due:
+            if show.occurrence_key in already:
+                continue
+            occurrence = RadioOccurrence(
+                occurrence_key=show.occurrence_key,
+                station_identifier=station,
+                source_event_id=show.source_event_id,
+                title=show.title,
+                presenter=show.presenter,
+                scheduled_start=show.scheduled_start,
+                scheduled_end=show.scheduled_end,
+                detected_live_at=show.scheduled_start,
+                detected_end_at=None,
+                description=show.description,
+                artwork_url=show.artwork_url,
+                notification_sent=False,
+                notification_message_id=None,
+            )
+            message_id = await self._send_occurrence(channel_id, occurrence)
+            if message_id is None:
+                # Channel trouble: retry on the next poll while still inside the grace window.
+                break
+            await self.database.mark_radio_schedule_announced(
+                station, show, snapshot.checked_at, message_id
+            )
+            LOGGER.info(
+                "Announced scheduled radio show %s (%s)", show.title, show.occurrence_key
+            )
+
     async def fetch_current(self) -> RadioSnapshot:
         """Fetch display data without changing notification/deduplication state."""
         return await self.client.fetch()
@@ -106,10 +192,14 @@ class RadioMonitor:
         channel_id = self.config.radio_channel_id
         if channel_id is None:
             return
-        for occurrence in await self.database.pending_radio_notifications(
-            self.config.radio_station_shortcode
-        ):
+        station = self.config.radio_station_shortcode
+        # A slot already announced from the schedule is never announced again here.
+        already = await self.database.announced_radio_schedule_keys(station, (occurrence_key,))
+        for occurrence in await self.database.pending_radio_notifications(station):
             if occurrence.occurrence_key != occurrence_key:
+                continue
+            if occurrence.occurrence_key in already:
+                await self.database.mark_radio_notification_sent(occurrence.occurrence_key, None)
                 continue
             message_id = await self._send_occurrence(channel_id, occurrence)
             if message_id is None:
@@ -144,12 +234,13 @@ class RadioMonitor:
             else discord.AllowedMentions.none()
         )
         dj_name = occurrence.presenter or occurrence.title
+        twitch_url = dj_stream_url(dj_name, self.dj_streams)
         try:
             message = await channel.send(
                 content=radio_notification_message(
-                    dj_name, role_id, self.client.public_url
+                    dj_name, role_id, self.client.public_url, twitch_url
                 ),
-                embed=radio_live_embed(occurrence, self.client.public_url),
+                embed=radio_live_embed(occurrence, self.client.public_url, twitch_url),
                 allowed_mentions=allowed_mentions,
             )
             return message.id

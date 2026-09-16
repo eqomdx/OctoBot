@@ -13,6 +13,8 @@ import aiohttp
 
 LOGGER = logging.getLogger(__name__)
 
+SCHEDULE_ROWS = 50
+
 LIVE = "live"
 AUTODJ = "autodj"
 OFFLINE = "offline"
@@ -33,12 +35,7 @@ class RadioShow:
 
     @property
     def identity(self) -> str:
-        parts = (
-            self.source_event_id or "",
-            self.presenter or "",
-            self.title,
-        )
-        return "|".join(_normalize(part) for part in parts)
+        return radio_identity(self.source_event_id, self.presenter, self.title)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +55,7 @@ class RadioSnapshot:
     platform_confirmed: bool
     error: str | None = None
     schedule_error: str | None = None
+    schedule: tuple[RadioShow, ...] = ()
 
     @property
     def is_live(self) -> bool:
@@ -330,6 +328,7 @@ def parse_now_playing(
         current_show=current_show,
         upcoming=upcoming,
         schedule_available=schedule_available,
+        schedule=schedule,
         station_timezone=station_timezone,
         platform_confirmed=True,
         schedule_error=schedule_error,
@@ -370,7 +369,8 @@ class RadioClient:
         self.station_shortcode = station_shortcode
         encoded = quote(station_shortcode, safe="")
         self.now_playing_url = f"{self.base_url}/api/nowplaying/{encoded}"
-        self.schedule_url = f"{self.base_url}/api/station/{encoded}/schedule"
+        # AzuraCast returns only 5 rows by default; /nextshows wants everything queued.
+        self.schedule_url = f"{self.base_url}/api/station/{encoded}/schedule?rows={SCHEDULE_ROWS}"
         self.public_url = f"{self.base_url}/public/{encoded}"
 
     async def _json(self, url: str) -> Any:
@@ -421,6 +421,65 @@ class RadioClient:
                 f"Malformed now-playing response: {type(exc).__name__}",
                 checked_at=checked_at,
             )
+
+
+# Known DJs and where they stream. Matched against the presenter name reported by
+# the station schedule, so "DJ Whiski", "Whiski" and "whiski" all resolve.
+DJ_TWITCH_STREAMS: dict[str, str] = {
+    "whiski": "https://www.twitch.tv/djwhiski",
+    "mossa": "https://www.twitch.tv/dj_mossa",
+    "tekeela": "https://www.twitch.tv/tekeelatv",
+    "sabellwind": "https://www.twitch.tv/sabellwind",
+}
+
+
+def parse_dj_streams(value: str | None) -> dict[str, str]:
+    """Parse ``Name=https://...,Other=https://...`` into a normalized lookup table."""
+    streams: dict[str, str] = {}
+    for entry in (value or "").split(","):
+        name, _, url = entry.partition("=")
+        key = _normalize(name)
+        url = url.strip()
+        if key and url.startswith(("http://", "https://")):
+            streams[key] = url
+    return streams
+
+
+def dj_stream_url(presenter: str | None, streams: dict[str, str] | None = None) -> str | None:
+    """Return the Twitch URL for the DJ named in ``presenter``, or None if unknown."""
+    if not presenter:
+        return None
+    table = DJ_TWITCH_STREAMS if streams is None else streams
+    needle = _normalize(presenter)
+    if not needle:
+        return None
+    if needle in table:
+        return table[needle]
+    # "dj-whiski" should still find "whiski"; longest key first avoids partial clashes.
+    for key in sorted(table, key=len, reverse=True):
+        if key and (key in needle or needle in key):
+            return table[key]
+    return None
+
+
+def radio_identity(source_event_id: str | None, presenter: str | None, title: str | None) -> str:
+    return "|".join(_normalize(part or "") for part in (source_event_id, presenter, title))
+
+
+def same_broadcaster(
+    previous_presenter: str | None,
+    previous_identity: str | None,
+    presenter: str | None,
+    identity: str,
+) -> bool:
+    """True when two live detections are plausibly the same DJ's broadcast.
+
+    A named presenter is compared by name; nameless streams fall back to the full
+    identity so two different anonymous shows are not merged by accident.
+    """
+    if presenter and previous_presenter:
+        return _normalize(presenter) == _normalize(previous_presenter)
+    return bool(previous_identity) and previous_identity == identity
 
 
 def fallback_occurrence_key(identity: str, detected_at: datetime) -> str:

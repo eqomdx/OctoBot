@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterable
 
 import aiosqlite
 
@@ -28,10 +29,13 @@ from .permissions import MANAGED_COMMANDS
 from .reports import CommunityReport, ReportGroup, ReportSummary, validate_report
 from .radio import (
     LIVE as RADIO_LIVE,
+    RadioShow,
     RadioSnapshot,
     RadioState,
     RadioTransition,
     fallback_occurrence_key,
+    radio_identity,
+    same_broadcaster,
 )
 from .status import (
     OFFLINE,
@@ -49,6 +53,11 @@ from .status import (
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
+
+
+# A DJ who drops and reconnects within this window is treated as resuming the same
+# show rather than starting a new one, so the channel is not pinged twice.
+RADIO_RESUME_GRACE = timedelta(minutes=15)
 
 
 def _datetime(value: str | None) -> datetime | None:
@@ -371,6 +380,17 @@ CREATE TABLE IF NOT EXISTS radio_show_history (
 
 CREATE INDEX IF NOT EXISTS idx_radio_history_station_time
 ON radio_show_history(station_identifier, detected_live_at DESC);
+
+CREATE TABLE IF NOT EXISTS radio_schedule_announcements (
+    occurrence_key TEXT PRIMARY KEY,
+    station_identifier TEXT NOT NULL,
+    title TEXT NOT NULL,
+    presenter TEXT,
+    scheduled_start TEXT NOT NULL,
+    scheduled_end TEXT,
+    announced_at TEXT NOT NULL,
+    message_id INTEGER
+);
 
 CREATE TABLE IF NOT EXISTS report_alert_state (
     guild_id INTEGER PRIMARY KEY,
@@ -1161,6 +1181,19 @@ class Database:
                             identity, snapshot.checked_at
                         )
 
+                # The same DJ stays one occurrence even when the key flips, e.g. an
+                # unscheduled ``live:`` key becoming the ``schedule:`` key at slot
+                # start, or back again when the DJ overruns the slot.
+                if (
+                    current_state == RADIO_LIVE
+                    and current_key
+                    and current_key != candidate_key
+                    and same_broadcaster(
+                        current_presenter, current_identity, show.presenter, identity
+                    )
+                ):
+                    candidate_key = current_key
+
                 missing_count = 0
                 if current_state == RADIO_LIVE and current_key == candidate_key:
                     pending_key = None
@@ -1175,6 +1208,31 @@ class Database:
                     scheduled_end = (
                         _iso(show.scheduled_end) if show.scheduled_end else None
                     )
+                    if (
+                        current_title != row["current_title"]
+                        or scheduled_start != row["scheduled_start"]
+                        or scheduled_end != row["scheduled_end"]
+                    ):
+                        await connection.execute(
+                            """
+                            UPDATE radio_show_history
+                            SET title = ?, presenter = COALESCE(?, presenter),
+                                source_event_id = COALESCE(?, source_event_id),
+                                scheduled_start = COALESCE(?, scheduled_start),
+                                scheduled_end = COALESCE(?, scheduled_end),
+                                description = COALESCE(?, description)
+                            WHERE occurrence_key = ?
+                            """,
+                            (
+                                show.title,
+                                show.presenter,
+                                show.source_event_id,
+                                scheduled_start,
+                                scheduled_end,
+                                show.description,
+                                current_key,
+                            ),
+                        )
                 else:
                     if pending_key == candidate_key:
                         pending_count += 1
@@ -1193,6 +1251,13 @@ class Database:
                                 """,
                                 (checked_at, current_key),
                             )
+                        else:
+                            resumed = await self._recently_ended_radio_occurrence(
+                                connection, station, show.presenter, identity,
+                                snapshot.checked_at,
+                            )
+                            if resumed is not None:
+                                candidate_key = resumed
 
                         current_state = RADIO_LIVE
                         current_key = candidate_key
@@ -1345,6 +1410,87 @@ class Database:
             last_success_at=_datetime(row["last_success_at"]),
             error=row["last_error"],
         )
+
+    async def _recently_ended_radio_occurrence(
+        self,
+        connection: aiosqlite.Connection,
+        station: str,
+        presenter: str | None,
+        identity: str,
+        now: datetime,
+    ) -> str | None:
+        """Return the key of a show by the same DJ that ended within the grace window."""
+        cursor = await connection.execute(
+            """
+            SELECT occurrence_key, presenter, source_event_id, title, detected_end_at
+            FROM radio_show_history
+            WHERE station_identifier = ? AND detected_end_at IS NOT NULL
+            ORDER BY detected_end_at DESC
+            LIMIT 5
+            """,
+            (station,),
+        )
+        for row in await cursor.fetchall():
+            ended_at = _datetime(row["detected_end_at"])
+            if ended_at is None or now - ended_at > RADIO_RESUME_GRACE:
+                continue
+            previous_identity = radio_identity(
+                row["source_event_id"], row["presenter"], row["title"]
+            )
+            if same_broadcaster(row["presenter"], previous_identity, presenter, identity):
+                return str(row["occurrence_key"])
+        return None
+
+    async def announced_radio_schedule_keys(
+        self, station_identifier: str, keys: Iterable[str]
+    ) -> set[str]:
+        wanted = [key for key in keys if key]
+        if not wanted:
+            return set()
+        placeholders = ",".join("?" for _ in wanted)
+        async with self._lock:
+            cursor = await self._connection().execute(
+                f"""
+                SELECT occurrence_key FROM radio_schedule_announcements
+                WHERE station_identifier = ? AND occurrence_key IN ({placeholders})
+                """,
+                (station_identifier, *wanted),
+            )
+            rows = await cursor.fetchall()
+        return {str(row["occurrence_key"]) for row in rows}
+
+    async def mark_radio_schedule_announced(
+        self,
+        station_identifier: str,
+        show: RadioShow,
+        announced_at: datetime,
+        message_id: int | None,
+    ) -> None:
+        if show.occurrence_key is None or show.scheduled_start is None:
+            raise ValueError("Only scheduled shows with a start time can be announced")
+        async with self._lock:
+            await self._connection().execute(
+                """
+                INSERT INTO radio_schedule_announcements(
+                    occurrence_key, station_identifier, title, presenter,
+                    scheduled_start, scheduled_end, announced_at, message_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(occurrence_key) DO UPDATE SET
+                    announced_at = excluded.announced_at,
+                    message_id = excluded.message_id
+                """,
+                (
+                    show.occurrence_key,
+                    station_identifier,
+                    show.title,
+                    show.presenter,
+                    _iso(show.scheduled_start),
+                    _iso(show.scheduled_end) if show.scheduled_end else None,
+                    _iso(announced_at),
+                    message_id,
+                ),
+            )
+            await self._connection().commit()
 
     async def pending_radio_notifications(
         self, station_identifier: str

@@ -20,7 +20,7 @@ from .database import (
     ReportIncident,
     UptimeStats,
 )
-from .radio import AUTODJ, LIVE as RADIO_LIVE, OFFLINE as RADIO_OFFLINE, UNKNOWN as RADIO_UNKNOWN, RadioSnapshot
+from .radio import AUTODJ, LIVE as RADIO_LIVE, OFFLINE as RADIO_OFFLINE, UNKNOWN as RADIO_UNKNOWN, RadioSnapshot, dj_stream_url
 from .reports import CommunityReport, ReportSummary
 from .status import (
     DEGRADED,
@@ -583,7 +583,9 @@ def report_recovery_embed(incident: ReportIncident) -> discord.Embed:
     return embed
 
 
-def radio_live_embed(occurrence: RadioOccurrence, public_url: str) -> discord.Embed:
+def radio_live_embed(
+    occurrence: RadioOccurrence, public_url: str, twitch_url: str | None = None
+) -> discord.Embed:
     presenter = occurrence.presenter or occurrence.title
     embed = discord.Embed(
         title="📻 Booty Bay Pirate Radio — Now Live",
@@ -601,11 +603,83 @@ def radio_live_embed(occurrence: RadioOccurrence, public_url: str) -> discord.Em
         embed.add_field(name="Scheduled end", value=discord_time(occurrence.scheduled_end, "t"), inline=True)
     if occurrence.description:
         embed.add_field(name="About this show", value=occurrence.description[:1024], inline=False)
-    embed.add_field(name="Listen", value=f"[Booty Bay Pirate Radio]({public_url})", inline=False)
+    listen = f"In-game radio • [Radio website]({public_url})"
+    if twitch_url:
+        listen += f" • [Twitch]({twitch_url})"
+    embed.add_field(name="Listen", value=listen, inline=False)
     if occurrence.artwork_url and occurrence.artwork_url.startswith(("http://", "https://")):
         embed.set_thumbnail(url=occurrence.artwork_url)
     embed.set_footer(text="Tune in through the in-game radio or the web player")
     return embed
+
+
+def next_shows_embeds(
+    snapshot: RadioSnapshot, dj_streams: dict[str, str] | None = None
+) -> list[discord.Embed]:
+    """Every upcoming scheduled show, absolute and relative time, one field each.
+
+    Discord allows 25 fields per embed, so a long schedule spills into extra embeds.
+    """
+    def new_embed() -> discord.Embed:
+        return discord.Embed(
+            title="📻 Upcoming Booty Bay Pirate Radio shows",
+            url=snapshot.public_url,
+            color=discord.Color.blurple(),
+            timestamp=snapshot.checked_at,
+        )
+
+    embed = new_embed()
+    if not snapshot.source_ok:
+        embed.description = "⚪ The radio API could not be read right now."
+        if snapshot.error:
+            embed.add_field(name="Source", value=snapshot.error[:1024], inline=False)
+        return [embed]
+    if not snapshot.schedule_available:
+        message = "The schedule is unavailable from the public radio API."
+        if snapshot.schedule_error:
+            message += f"\n{snapshot.schedule_error}"
+        embed.description = message[:4096]
+        return [embed]
+
+    if snapshot.state == RADIO_LIVE and snapshot.current_show is not None:
+        show = snapshot.current_show
+        presenter = show.presenter or "Live DJ"
+        live_line = f"🔴 **LIVE NOW:** **{show.title}** with **{presenter}**"
+        if show.scheduled_end:
+            live_line += f" — ends {discord_time(show.scheduled_end, 'R')}"
+        embed.description = live_line
+
+    if not snapshot.upcoming:
+        embed.add_field(
+            name="Upcoming shows",
+            value="No upcoming live shows are currently scheduled.",
+            inline=False,
+        )
+        return [embed]
+
+    embeds = [embed]
+    for index, show in enumerate(snapshot.upcoming, start=1):
+        if len(embeds[-1].fields) >= 25:
+            embeds.append(new_embed())
+        presenter = f" — {show.presenter}" if show.presenter else ""
+        lines = [
+            f"{discord_time(show.scheduled_start, 'f')} • {discord_time(show.scheduled_start, 'R')}"
+        ]
+        if show.scheduled_end:
+            lines.append(f"Ends {discord_time(show.scheduled_end, 't')}")
+        twitch = dj_stream_url(show.presenter, dj_streams)
+        if twitch:
+            lines.append(f"[Twitch]({twitch})")
+        embeds[-1].add_field(
+            name=f"{index}. {show.title}{presenter}",
+            value="\n".join(lines)[:1024],
+            inline=False,
+        )
+    total = len(snapshot.upcoming)
+    embeds[-1].set_footer(
+        text=f"{total} upcoming show{'s' if total != 1 else ''} • times shown in your local time zone"
+    )
+    return embeds
 
 
 def radio_status_embed(snapshot: RadioSnapshot) -> discord.Embed:
