@@ -70,6 +70,7 @@ MODERATION_HELP_DESCRIPTIONS: dict[str, str] = {
     "clearcheck": "Clear a member's recorded /check history.",
     "history": "Show a member's recent server messages.",
     "settings": "Configure OctoBot moderation permissions and behaviour.",
+    "rolesweep": "One-off: strip the legacy role from members holding a superseding role.",
 }
 
 
@@ -92,6 +93,9 @@ class OctoBot(commands.Bot):
         # Required for /history to index message text from guild message events.
         # Enable Message Content Intent in the Discord Developer Portal as well.
         intents.message_content = True
+        # Required for role cleanup (member role updates and listing members).
+        # Enable Server Members Intent in the Discord Developer Portal as well.
+        intents.members = True
         super().__init__(command_prefix="!", intents=intents)
 
         command_definitions = (
@@ -142,11 +146,13 @@ class OctoBot(commands.Bot):
         await self._seed_moderation_defaults()
 
         from octocop.cogs.moderation import ModerationCog
+        from octocop.cogs.roles import RoleCleanupCog
         from octocop.cogs.settings import SettingsCog
 
         # Register moderation commands directly to the configured guild.
         await self.add_cog(ModerationCog(self), guild=self.guild)
         await self.add_cog(SettingsCog(self), guild=self.guild)
+        await self.add_cog(RoleCleanupCog(self), guild=self.guild)
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_seconds),
             headers={"User-Agent": "OctoBot/1.0 (+OctoWoW Discord bot)"},
@@ -517,6 +523,7 @@ class OctoBot(commands.Bot):
             if mod_perms.can_manage_settings:
                 visible.append(("clearcheck", MODERATION_HELP_DESCRIPTIONS["clearcheck"]))
                 visible.append(("settings", MODERATION_HELP_DESCRIPTIONS["settings"]))
+                visible.append(("rolesweep", MODERATION_HELP_DESCRIPTIONS["rolesweep"]))
 
         await interaction.response.send_message(
             embed=help_embed(visible, command_channel), ephemeral=True

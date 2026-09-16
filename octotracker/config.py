@@ -27,6 +27,24 @@ def _discord_id(name: str, *, required: bool = False) -> int | None:
     return parsed
 
 
+def _discord_id_set(name: str, default: str) -> frozenset[int]:
+    """Comma-separated Discord IDs. An empty value disables the feature."""
+    value = os.getenv(name, default).strip()
+    ids: set[int] = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            parsed = int(part)
+        except ValueError as exc:
+            raise RuntimeError(f"{name} must be comma-separated Discord numeric IDs") from exc
+        if parsed <= 0:
+            raise RuntimeError(f"{name} must contain positive Discord numeric IDs")
+        ids.add(parsed)
+    return frozenset(ids)
+
+
 def _positive_int(name: str, default: int) -> int:
     value = os.getenv(name, str(default)).strip()
     try:
@@ -105,6 +123,15 @@ class Config:
     helper_role_id: int | None = None
     moderator_role_id: int | None = None
     admin_role_id: int | None = None
+    # Legacy-role cleanup: members holding a trigger role lose the legacy role.
+    role_cleanup_remove_role_id: int | None = 1547037223558451291
+    role_cleanup_auto_trigger_role_ids: frozenset[int] = frozenset({1547371277474603028})
+    role_cleanup_sweep_trigger_role_ids: frozenset[int] = frozenset({
+        1547038342661804194,
+        1547038337297154078,
+        1547038296025333880,
+        1547371277474603028,
+    })
     report_active_minutes: int = 10
     report_degraded_threshold: int = 3
     database_path: Path = PROJECT_ROOT / "data" / "octobot.db"
@@ -183,6 +210,18 @@ class Config:
             helper_role_id=_discord_id("DISCORD_HELPER_ROLE_ID"),
             moderator_role_id=_discord_id("DISCORD_MODERATOR_ROLE_ID"),
             admin_role_id=_discord_id("DISCORD_ADMIN_ROLE_ID"),
+            role_cleanup_remove_role_id=(
+                _discord_id("ROLE_CLEANUP_REMOVE_ROLE_ID")
+                if os.getenv("ROLE_CLEANUP_REMOVE_ROLE_ID") is not None
+                else 1547037223558451291
+            ),
+            role_cleanup_auto_trigger_role_ids=_discord_id_set(
+                "ROLE_CLEANUP_AUTO_TRIGGER_ROLE_IDS", "1547371277474603028"
+            ),
+            role_cleanup_sweep_trigger_role_ids=_discord_id_set(
+                "ROLE_CLEANUP_SWEEP_TRIGGER_ROLE_IDS",
+                "1547038342661804194,1547038337297154078,1547038296025333880,1547371277474603028",
+            ),
             report_active_minutes=_positive_int("REPORT_ACTIVE_MINUTES", 10),
             report_degraded_threshold=_positive_int(
                 "REPORT_DEGRADED_THRESHOLD", 3

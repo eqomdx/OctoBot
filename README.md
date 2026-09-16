@@ -1,4 +1,4 @@
-# OctoBot v1.0.8
+# OctoBot v1.0.9
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -42,6 +42,7 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
   - Clears the user's full `/check`/`/warnings` profile after a confirmation prompt.
   - History removal is soft-delete only: database rows remain for audit and an active Discord timeout is not lifted.
 - `/settings ...` moderation configuration
+- Legacy-role cleanup: a member who gains role `1547371277474603028` automatically loses role `1547037223558451291`. `/rolesweep` (settings permission) does a one-off pass over every member, also treating `1547038342661804194`, `1547038337297154078` and `1547038296025333880` as triggers. Configurable via `ROLE_CLEANUP_*`; needs the **Server Members Intent** enabled in the Developer Portal.
 - Helper default timeout limit: 1 hour
 - Moderator/Admin default timeout limit: Discord maximum (4 weeks)
 - Optional timeout message cleanup window
@@ -157,3 +158,7 @@ The ping links the radio website and the live DJ's Twitch stream (Whiski, Mossa,
 ## v1.0.8 recurring shows and end-of-show follow-up
 
 The schedule is read as a `start`/`end` date window (`RADIO_SCHEDULE_DAYS`, default 14) because AzuraCast only expands recurring shows for a date range, so `/nextshows` now lists every repeat. When an announced show's scheduled end passes, the `/nextshows` list is posted to the radio channel automatically, once per show.
+
+## v1.0.9 legacy-role cleanup
+
+Members who gain role `1547371277474603028` automatically lose role `1547037223558451291`; `/rolesweep` does a one-off pass using the wider trigger list. The bot now requests the Server Members Intent, which must be enabled in the Discord Developer Portal before this version is started.
