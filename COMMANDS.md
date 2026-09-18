@@ -90,12 +90,13 @@ All replies are private. Adds and removes go to the mod log.
 
 ### Raid protection (`/lockdown …`)
 
-While lockdown is on, every new joiner is DMed "We are currently in Lockdown. Please try again soon" and banned for **7 days**. The bot unbans them automatically when the 7 days are up. Bots that join are ignored.
+Starting a lockdown bans everyone who joined in the **previous 10 minutes** (staff and bots excluded). While it is on, every new joiner is DMed "We are currently in Lockdown. Please try again soon" and banned for **7 days**. The bot unbans them automatically when the 7 days are up.
 
 | Command | What it does |
 | --- | --- |
-| `/lockdown toggle on\|off` | `on` starts a lockdown for the configured timer (running it again extends it); `off` ends it now. |
-| `/lockdown timer minutes` | How long a lockdown lasts before switching itself off (1–1440, default 30). |
+| `/lockdown toggle on\|off` | `on` starts a lockdown for the configured timer and bans the last 10 minutes of joiners (running it again while on just extends it); `off` ends it now. |
+| `/lockdown cancel` | Stops the running lockdown before its timer runs out. |
+| `/lockdown timer duration` | How long a lockdown lasts before switching itself off. Accepts `s`, `m`, `h`, `d` and combinations (`90s`, `30m`, `2h`, `1d`, `1h30m`), up to 7 days. Default 30m. |
 | `/lockdown status` | On/off, when it ends, how many joiners were banned this lockdown, how many are still banned, and the all-time total. |
 
 All replies are private. Start, end and every ban go to the mod log.

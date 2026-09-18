@@ -10,6 +10,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from ..duration import DurationError, format_duration, parse_duration
+
 if TYPE_CHECKING:
     from octobot.bot import OctoBot
 
@@ -17,8 +19,12 @@ log = logging.getLogger(__name__)
 
 LOCKDOWN_DM = "We are currently in Lockdown. Please try again soon"
 LOCKDOWN_BAN_DAYS = 7
-DEFAULT_LOCKDOWN_MINUTES = 30
-SWEEP_SECONDS = 30
+DEFAULT_LOCKDOWN_SECONDS = 30 * 60
+MAX_LOCKDOWN_SECONDS = 7 * 24 * 60 * 60
+# Starting a lockdown also bans everyone who joined this recently: a raid is
+# usually noticed a few minutes in, and those accounts are already inside.
+RECENT_JOIN_WINDOW = timedelta(minutes=10)
+SWEEP_SECONDS = 10
 
 
 def utc_now() -> datetime:
@@ -58,11 +64,12 @@ class LockdownCog(
         return self.bot.moderation_database
 
     async def _state(self, guild_id: int) -> tuple[datetime | None, int]:
+        """(lockdown end time or None, configured duration in seconds)."""
         settings = await self._db.get_guild_settings(guild_id)
         until = settings.get("lockdown_until")
         until_dt = datetime.fromisoformat(until) if until else None
-        minutes = int(settings.get("lockdown_minutes") or DEFAULT_LOCKDOWN_MINUTES)
-        return until_dt, minutes
+        seconds = int(settings.get("lockdown_seconds") or DEFAULT_LOCKDOWN_SECONDS)
+        return until_dt, seconds
 
     async def is_active(self, guild_id: int, now: datetime | None = None) -> bool:
         until, _ = await self._state(guild_id)
@@ -96,7 +103,29 @@ class LockdownCog(
             return False
         if not await self.is_active(member.guild.id, now):
             return False
+        return await self._ban_for_lockdown(member, now, "joined during lockdown")
 
+    async def _is_staff(self, member: discord.Member) -> bool:
+        if member.id == member.guild.owner_id or member.guild_permissions.administrator:
+            return True
+        perms = await self.bot.moderation_permissions.for_member(member)
+        return any((perms.can_timeout, perms.can_warn, perms.can_check, perms.can_manage_settings))
+
+    async def ban_recent_joiners(self, guild: discord.Guild, now: datetime) -> int:
+        """Ban members who joined within RECENT_JOIN_WINDOW. Returns how many were banned."""
+        cutoff = now - RECENT_JOIN_WINDOW
+        banned = 0
+        for member in list(guild.members):
+            joined = getattr(member, "joined_at", None)
+            if member.bot or joined is None or joined < cutoff:
+                continue
+            if await self._is_staff(member):
+                continue
+            if await self._ban_for_lockdown(member, now, "joined in the 10 minutes before lockdown"):
+                banned += 1
+        return banned
+
+    async def _ban_for_lockdown(self, member: discord.Member, now: datetime, why: str) -> bool:
         dm_sent = True
         try:
             await member.send(LOCKDOWN_DM)
@@ -115,7 +144,7 @@ class LockdownCog(
             return False
 
         await self._db.add_lockdown_ban(member.guild.id, member.id, now, unban_at)
-        embed = discord.Embed(title="Lockdown: joiner banned")
+        embed = discord.Embed(title="Lockdown: joiner banned", description=why)
         embed.add_field(name="User", value=f"{member.mention} (`{member.id}`)", inline=False)
         embed.add_field(name="Account created", value=f"<t:{int(member.created_at.timestamp())}:R>", inline=True)
         embed.add_field(name="Unban", value=f"<t:{int(unban_at.timestamp())}:R>", inline=True)
@@ -150,7 +179,7 @@ class LockdownCog(
         until, _ = await self._state(guild.id)
         if until is not None and until <= now:
             await self._db.set_lockdown_until(guild.id, None)
-            count = await self._db.count_lockdown_bans_since(guild.id, until - timedelta(days=1))
+            count = await self._db.count_lockdown_bans_since(guild.id, until - timedelta(seconds=MAX_LOCKDOWN_SECONDS))
             embed = discord.Embed(title="Lockdown ended", description="The timer ran out.")
             embed.add_field(name="Joiners banned during lockdown", value=str(count), inline=True)
             await self._log(guild, embed)
@@ -169,60 +198,98 @@ class LockdownCog(
 
     # ------------------------------------------------------------------ commands
 
+    async def _end_now(
+        self, interaction: discord.Interaction, actor: discord.Member, guild: discord.Guild, how: str
+    ) -> None:
+        now = utc_now()
+        until, seconds = await self._state(guild.id)
+        if until is None or until <= now:
+            await interaction.response.send_message("Lockdown is already off.", ephemeral=True)
+            return
+        await self._db.set_lockdown_until(guild.id, None)
+        count = await self._db.count_lockdown_bans_since(guild.id, until - timedelta(seconds=seconds))
+        remaining = format_duration(max(1, int((until - now).total_seconds())))
+        await interaction.response.send_message(
+            f"🔓 Lockdown {how} with **{remaining}** left on the timer. {count} joiner(s) were banned "
+            f"during it; each is unbanned automatically after {LOCKDOWN_BAN_DAYS} days.",
+            ephemeral=True,
+        )
+        embed = discord.Embed(title=f"Lockdown {how}", description=f"{remaining} was left on the timer.")
+        embed.add_field(name="Joiners banned during lockdown", value=str(count), inline=True)
+        embed.add_field(name="By", value=actor.mention, inline=True)
+        await self._log(guild, embed)
+
     @app_commands.command(name="toggle", description="Turn lockdown on (for the configured timer) or off.")
-    @app_commands.describe(state="on starts a lockdown for the configured minutes; off ends it now")
+    @app_commands.describe(state="on starts a lockdown for the configured timer; off ends it now")
     @app_commands.guild_only()
     async def toggle(self, interaction: discord.Interaction, state: Literal["on", "off"]) -> None:
         context = await self._require_manage(interaction)
         if context is None:
             return
         actor, guild = context
+        if state == "off":
+            await self._end_now(interaction, actor, guild, "turned off")
+            return
+
         now = utc_now()
-        until, minutes = await self._state(guild.id)
+        until, seconds = await self._state(guild.id)
         active = until is not None and until > now
+        new_until = now + timedelta(seconds=seconds)
+        await self._db.set_lockdown_until(guild.id, new_until)
+        verb = "extended" if active else "started"
 
-        if state == "on":
-            new_until = now + timedelta(minutes=minutes)
-            await self._db.set_lockdown_until(guild.id, new_until)
-            verb = "extended" if active else "started"
-            await interaction.response.send_message(
-                f"🔒 Lockdown {verb}. Everyone who joins is banned for {LOCKDOWN_BAN_DAYS} days "
-                f"until <t:{int(new_until.timestamp())}:t> (<t:{int(new_until.timestamp())}:R>).",
-                ephemeral=True,
-            )
-            embed = discord.Embed(title=f"Lockdown {verb}", colour=discord.Colour.red())
-            embed.add_field(name="Ends", value=f"<t:{int(new_until.timestamp())}:F>", inline=True)
-            embed.add_field(name="By", value=actor.mention, inline=True)
-            await self._log(guild, embed)
-            return
-
+        # Banning recent joiners can take a while on a busy raid; acknowledge first.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        retro = 0
         if not active:
-            await interaction.response.send_message("Lockdown is already off.", ephemeral=True)
-            return
-        await self._db.set_lockdown_until(guild.id, None)
-        count = await self._db.count_lockdown_bans_since(guild.id, until - timedelta(minutes=minutes))
-        await interaction.response.send_message(
-            f"🔓 Lockdown ended. {count} joiner(s) were banned during it; each is unbanned "
-            f"automatically after {LOCKDOWN_BAN_DAYS} days.",
+            retro = await self.ban_recent_joiners(guild, now)
+        retro_note = (
+            f" Also banned **{retro}** member(s) who joined in the last "
+            f"{int(RECENT_JOIN_WINDOW.total_seconds() // 60)} minutes."
+            if not active else ""
+        )
+        await interaction.followup.send(
+            f"🔒 Lockdown {verb} for **{format_duration(seconds)}**. Everyone who joins is banned for "
+            f"{LOCKDOWN_BAN_DAYS} days until <t:{int(new_until.timestamp())}:t> "
+            f"(<t:{int(new_until.timestamp())}:R>).{retro_note} `/lockdown cancel` stops it early.",
             ephemeral=True,
         )
-        embed = discord.Embed(title="Lockdown ended", description="Turned off by staff.")
-        embed.add_field(name="Joiners banned during lockdown", value=str(count), inline=True)
+        embed = discord.Embed(title=f"Lockdown {verb}", colour=discord.Colour.red())
+        embed.add_field(name="Ends", value=f"<t:{int(new_until.timestamp())}:F>", inline=True)
         embed.add_field(name="By", value=actor.mention, inline=True)
+        if not active:
+            embed.add_field(name="Recent joiners banned", value=str(retro), inline=True)
         await self._log(guild, embed)
 
-    @app_commands.command(name="timer", description="Set how many minutes a lockdown lasts before turning itself off.")
-    @app_commands.describe(minutes="Minutes (1–1440). Applies to the next /lockdown toggle on.")
+    @app_commands.command(name="cancel", description="Stop the current lockdown before its timer runs out.")
     @app_commands.guild_only()
-    async def timer(self, interaction: discord.Interaction, minutes: app_commands.Range[int, 1, 1440]) -> None:
+    async def cancel(self, interaction: discord.Interaction) -> None:
+        context = await self._require_manage(interaction)
+        if context is None:
+            return
+        actor, guild = context
+        await self._end_now(interaction, actor, guild, "cancelled")
+
+    @app_commands.command(name="timer", description="Set how long a lockdown lasts before turning itself off.")
+    @app_commands.describe(duration="Duration using s, m, h, d (examples: 90s, 30m, 2h, 1d, 1h30m). Max 7d.")
+    @app_commands.guild_only()
+    async def timer(self, interaction: discord.Interaction, duration: str) -> None:
         context = await self._require_manage(interaction)
         if context is None:
             return
         _, guild = context
-        await self._db.set_lockdown_minutes(guild.id, minutes)
+        try:
+            seconds = parse_duration(duration, maximum=MAX_LOCKDOWN_SECONDS)
+        except DurationError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await self._db.set_lockdown_seconds(guild.id, seconds)
+        until, _ = await self._state(guild.id)
+        note = ""
+        if until is not None and until > utc_now():
+            note = " The lockdown running now keeps its current end time; use `/lockdown toggle on` to restart it with the new timer."
         await interaction.response.send_message(
-            f"Lockdown timer set to **{minutes} minute{'s' if minutes != 1 else ''}**. "
-            "It applies the next time lockdown is turned on.",
+            f"Lockdown timer set to **{format_duration(seconds)}**.{note}",
             ephemeral=True,
         )
 
@@ -234,7 +301,7 @@ class LockdownCog(
             return
         _, guild = context
         now = utc_now()
-        until, minutes = await self._state(guild.id)
+        until, seconds = await self._state(guild.id)
         active = until is not None and until > now
         currently_banned = await self._db.count_active_lockdown_bans(guild.id, now)
         total = await self._db.count_lockdown_bans_since(guild.id, None)
@@ -245,9 +312,9 @@ class LockdownCog(
         )
         if active:
             embed.add_field(name="Ends", value=f"<t:{int(until.timestamp())}:t> (<t:{int(until.timestamp())}:R>)", inline=True)
-            banned_this = await self._db.count_lockdown_bans_since(guild.id, until - timedelta(minutes=minutes))
+            banned_this = await self._db.count_lockdown_bans_since(guild.id, until - timedelta(seconds=seconds))
             embed.add_field(name="Banned this lockdown", value=str(banned_this), inline=True)
-        embed.add_field(name="Timer", value=f"{minutes} min", inline=True)
+        embed.add_field(name="Timer", value=format_duration(seconds), inline=True)
         embed.add_field(name="Still banned (auto-unban pending)", value=str(currently_banned), inline=True)
         embed.add_field(name="Banned by lockdown, all time", value=str(total), inline=True)
         embed.set_footer(text=f"Joiners are banned for {LOCKDOWN_BAN_DAYS} days and unbanned automatically")

@@ -78,7 +78,7 @@ class Database:
                 dm_bans INTEGER NOT NULL DEFAULT 1,
                 timeout_cleanup_minutes INTEGER NOT NULL DEFAULT 0,
                 lockdown_until TEXT,
-                lockdown_minutes INTEGER NOT NULL DEFAULT 30
+                lockdown_seconds INTEGER NOT NULL DEFAULT 1800
             );
 
             CREATE TABLE IF NOT EXISTS role_permissions (
@@ -205,10 +205,15 @@ class Database:
             )
         if "lockdown_until" not in guild_columns:
             await self.db.execute("ALTER TABLE guild_settings ADD COLUMN lockdown_until TEXT")
-        if "lockdown_minutes" not in guild_columns:
+        if "lockdown_seconds" not in guild_columns:
             await self.db.execute(
-                "ALTER TABLE guild_settings ADD COLUMN lockdown_minutes INTEGER NOT NULL DEFAULT 30"
+                "ALTER TABLE guild_settings ADD COLUMN lockdown_seconds INTEGER NOT NULL DEFAULT 1800"
             )
+            if "lockdown_minutes" in guild_columns:
+                # v1.0.12 stored whole minutes; carry the value across.
+                await self.db.execute(
+                    "UPDATE guild_settings SET lockdown_seconds = lockdown_minutes * 60"
+                )
 
         async with self.db.execute("PRAGMA table_info(role_permissions)") as cur:
             role_columns = {str(row["name"]) for row in await cur.fetchall()}
@@ -292,11 +297,11 @@ class Database:
         )
         await self.db.commit()
 
-    async def set_lockdown_minutes(self, guild_id: int, minutes: int) -> None:
+    async def set_lockdown_seconds(self, guild_id: int, seconds: int) -> None:
         await self.ensure_guild(guild_id)
         await self.db.execute(
-            "UPDATE guild_settings SET lockdown_minutes = ? WHERE guild_id = ?",
-            (minutes, guild_id),
+            "UPDATE guild_settings SET lockdown_seconds = ? WHERE guild_id = ?",
+            (seconds, guild_id),
         )
         await self.db.commit()
 
