@@ -25,6 +25,7 @@ PERMISSION_CHOICES = [
 ]
 
 
+@app_commands.default_permissions(administrator=True)
 class SettingsCog(
     commands.GroupCog,
     group_name="settings",
@@ -41,9 +42,11 @@ class SettingsCog(
             return None
         return interaction.user, interaction.guild
 
-    async def _can_manage(self, actor: discord.Member) -> bool:
-        perms = await self.bot.moderation_permissions.for_member(actor)
-        return perms.can_manage_settings
+    @staticmethod
+    async def _can_manage(actor: discord.Member) -> bool:
+        # /settings is reserved for Discord Administrators and the owner. The bot's own
+        # "Manage settings" permission still gates /clearcheck, /check remove and /word.
+        return actor.id == actor.guild.owner_id or actor.guild_permissions.administrator
 
     async def _require_manage(
         self, interaction: discord.Interaction
@@ -54,7 +57,7 @@ class SettingsCog(
         actor, guild = context
         if not await self._can_manage(actor):
             await interaction.response.send_message(
-                "You do not have permission to manage OctoBot settings.", ephemeral=True
+                "Only server administrators can change OctoBot settings.", ephemeral=True
             )
             return None
         return actor, guild

@@ -119,6 +119,8 @@ class Config:
     # Days of schedule to read; recurring shows repeat within this window.
     radio_schedule_days: int = 14
     bot_commands_channel_id: int | None = None
+    # /authcheck is public but only usable in this channel (None = anywhere).
+    authcheck_channel_id: int | None = 1547064843909988433
     log_channel_id: int | None = None
     helper_role_id: int | None = None
     moderator_role_id: int | None = None
@@ -126,12 +128,6 @@ class Config:
     # Legacy-role cleanup: members holding a trigger role lose the legacy role.
     role_cleanup_remove_role_id: int | None = 1547037223558451291
     role_cleanup_auto_trigger_role_ids: frozenset[int] = frozenset({1547371277474603028})
-    role_cleanup_sweep_trigger_role_ids: frozenset[int] = frozenset({
-        1547038342661804194,
-        1547038337297154078,
-        1547038296025333880,
-        1547371277474603028,
-    })
     report_active_minutes: int = 10
     report_degraded_threshold: int = 3
     database_path: Path = PROJECT_ROOT / "data" / "octobot.db"
@@ -203,6 +199,11 @@ class Config:
             radio_schedule_days=_positive_int("RADIO_SCHEDULE_DAYS", 14),
             # Kept only for backward compatibility with older OctoTracker .env files.
             # OctoBot commands are intentionally usable in every accessible channel.
+            authcheck_channel_id=(
+                _discord_id("DISCORD_AUTHCHECK_CHANNEL_ID")
+                if os.getenv("DISCORD_AUTHCHECK_CHANNEL_ID") is not None
+                else 1547064843909988433
+            ),
             bot_commands_channel_id=_discord_id(
                 "DISCORD_BOT_COMMANDS_CHANNEL_ID"
             ),
@@ -217,10 +218,6 @@ class Config:
             ),
             role_cleanup_auto_trigger_role_ids=_discord_id_set(
                 "ROLE_CLEANUP_AUTO_TRIGGER_ROLE_IDS", "1547371277474603028"
-            ),
-            role_cleanup_sweep_trigger_role_ids=_discord_id_set(
-                "ROLE_CLEANUP_SWEEP_TRIGGER_ROLE_IDS",
-                "1547038342661804194,1547038337297154078,1547038296025333880,1547371277474603028",
             ),
             report_active_minutes=_positive_int("REPORT_ACTIVE_MINUTES", 10),
             report_degraded_threshold=_positive_int(

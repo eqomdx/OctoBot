@@ -71,9 +71,9 @@ MODERATION_HELP_DESCRIPTIONS: dict[str, str] = {
     "check": "View a member's complete warning/timeout history and reasons.",
     "clearcheck": "Clear a member's recorded /check history.",
     "history": "Show a member's recent server messages.",
-    "settings": "Configure OctoBot moderation permissions and behaviour.",
+    "settings": "Configure OctoBot moderation permissions and behaviour (administrators).",
     "word": "Manage the banned-word filter (list / add / remove).",
-    "rolesweep": "One-off: strip the legacy role from members holding a superseding role.",
+    "lockdown": "Raid protection: toggle, timer and status.",
 }
 
 
@@ -149,6 +149,7 @@ class OctoBot(commands.Bot):
         await self._seed_moderation_defaults()
 
         from octocop.cogs.moderation import ModerationCog
+        from octocop.cogs.lockdown import LockdownCog
         from octocop.cogs.roles import RoleCleanupCog
         from octocop.cogs.settings import SettingsCog
         from octocop.cogs.words import WordFilterCog
@@ -158,6 +159,7 @@ class OctoBot(commands.Bot):
         await self.add_cog(SettingsCog(self), guild=self.guild)
         await self.add_cog(RoleCleanupCog(self), guild=self.guild)
         await self.add_cog(WordFilterCog(self), guild=self.guild)
+        await self.add_cog(LockdownCog(self), guild=self.guild)
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_seconds),
             headers={"User-Agent": "OctoBot/1.0 (+OctoWoW Discord bot)"},
@@ -508,8 +510,10 @@ class OctoBot(commands.Bot):
         if self._is_moderator(interaction):
             visible.append(("reports-details", "View individual active report details."))
             visible.append(("reports-clear", "Clear active community reports."))
-        if self._is_administrator(interaction):
+        authcheck_channel = self.config.authcheck_channel_id
+        if authcheck_channel is None or interaction.channel_id == authcheck_channel:
             visible.append(("authcheck", "Run a one-off authentication diagnostic."))
+        if self._is_administrator(interaction):
             visible.append(("config command-role", "Configure which roles can use tracker commands."))
 
         if isinstance(interaction.user, discord.Member):
@@ -532,17 +536,22 @@ class OctoBot(commands.Bot):
                 visible.append(("history", MODERATION_HELP_DESCRIPTIONS["history"]))
             if mod_perms.can_manage_settings:
                 visible.append(("clearcheck", MODERATION_HELP_DESCRIPTIONS["clearcheck"]))
-                visible.append(("settings", MODERATION_HELP_DESCRIPTIONS["settings"]))
                 visible.append(("word", MODERATION_HELP_DESCRIPTIONS["word"]))
-                visible.append(("rolesweep", MODERATION_HELP_DESCRIPTIONS["rolesweep"]))
+                visible.append(("lockdown", MODERATION_HELP_DESCRIPTIONS["lockdown"]))
+            if self._is_administrator(interaction):
+                visible.append(("settings", MODERATION_HELP_DESCRIPTIONS["settings"]))
 
         await interaction.response.send_message(
             embed=help_embed(visible, command_channel), ephemeral=True
         )
 
-    @app_commands.default_permissions(administrator=True)
     async def authcheck_command(self, interaction: discord.Interaction) -> None:
-        if not await self._require_administrator(interaction):
+        # Open to everyone, but confined to one channel so probes stay in one place.
+        channel_id = self.config.authcheck_channel_id
+        if channel_id is not None and interaction.channel_id != channel_id:
+            await interaction.response.send_message(
+                f"`/authcheck` can only be used in <#{channel_id}>.", ephemeral=True
+            )
             return
         await interaction.response.defer(thinking=True, ephemeral=True)
         try:

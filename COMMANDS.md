@@ -8,7 +8,7 @@ Tiers come from the bot's role profiles (`/settings view role`). On the OctoWoW 
 | --- | --- | --- |
 | Helper+ | Helper, Moderator, Admin | Timeout users (Helper max `1h`), Remove timeouts |
 | Mod+ | Moderator, Admin | Everything above plus Warn, View warnings, Check history, Ban, Whisper, Manage settings (max timeout `4w`) |
-| Admin only | Server owner, anyone with Discord **Administrator** | Everything, plus the tracker admin commands |
+| Admin only | Server owner, anyone with Discord **Administrator** | Everything, plus `/settings` and `/config` |
 
 Anyone with Discord Administrator or the server owner always has every bot permission, regardless of profile.
 
@@ -28,9 +28,10 @@ Public tracker commands. Admins can restrict any of them to specific roles with 
 | `/reports` | Current community reports, grouped by realm and issue. |
 | `/radio` | Booty Bay Pirate Radio: live/AutoDJ state, listeners, now playing, next shows. |
 | `/nextshows` | Every scheduled show for the next 14 days with date, countdown, end time and the DJ's Twitch link. |
+| `/authcheck` | Immediate diagnostic of the OctoWoW authentication endpoint. Only works in the designated channel. |
 | `/help` | Lists only the commands you can use. |
 
-Automatic: the radio role is pinged at each scheduled show's start, and the `/nextshows` list is posted when a show ends.
+Automatic: the radio role is pinged at each scheduled show's start, the `/nextshows` list is posted when a show ends, and a member who gains the newer membership role loses the legacy one.
 
 ---
 
@@ -87,12 +88,30 @@ Any message containing a banned word is deleted and the author timed out for 30 
 
 All replies are private. Adds and removes go to the mod log.
 
+### Raid protection (`/lockdown …`)
+
+While lockdown is on, every new joiner is DMed "We are currently in Lockdown. Please try again soon" and banned for **7 days**. The bot unbans them automatically when the 7 days are up. Bots that join are ignored.
+
+| Command | What it does |
+| --- | --- |
+| `/lockdown toggle on\|off` | `on` starts a lockdown for the configured timer (running it again extends it); `off` ends it now. |
+| `/lockdown timer minutes` | How long a lockdown lasts before switching itself off (1–1440, default 30). |
+| `/lockdown status` | On/off, when it ends, how many joiners were banned this lockdown, how many are still banned, and the all-time total. |
+
+All replies are private. Start, end and every ban go to the mod log.
+
 ### Community reports (Discord Manage Messages or Moderate Members)
 
 | Command | What it does |
 | --- | --- |
 | `/reports-details` | Each active report with who filed it and their details. |
 | `/reports-clear` | Clears all active reports. |
+
+---
+
+## Admin only commands
+
+These require Discord **Administrator** (or server owner); bot role profiles do not grant them.
 
 ### Bot settings (`/settings …`)
 
@@ -108,25 +127,17 @@ All replies are private. Adds and removes go to the mod log.
 | `/settings dm-bans true\|false` | DM users when banned. |
 | `/settings view role` | Show a role's bot permissions and timeout limit. |
 
-### `/rolesweep`
-One-off cleanup: removes the legacy role from every member holding one of the superseding roles. The same removal also happens automatically the moment a member gains the main trigger role. Reports how many members were checked and changed. **(private reply)**
-
----
-
-## Admin only commands
-
-These require Discord **Administrator** (or server owner); bot role profiles do not grant them.
+### Tracker access
 
 | Command | What it does |
 | --- | --- |
 | `/config command-role add command role` | Restrict a public tracker command (`status`, `uptime`, `incidents`, `announcement`, `report`, `reports`, `radio`) to a role. A command with no roles configured is open to everyone. `/nextshows` follows the `radio` rule. |
 | `/config command-role remove command role_id` | Remove one of those role restrictions. |
 | `/config command-role list` | Show all restrictions. |
-| `/authcheck` | Run an immediate diagnostic of the OctoWoW authentication endpoint. |
 
 ---
 
-## Making a command Admin-only
+## Making a moderation command Admin-only
 
 Moderator and Admin profiles are identical by default. To reserve something for Admins, deny it on the Moderator role:
 
@@ -134,7 +145,7 @@ Moderator and Admin profiles are identical by default. To reserve something for 
 /settings permission role:@Moderator permission:Ban users access:deny
 ```
 
-Admins keep it through their own profile (and Discord Administrator always overrides).
+Discord Administrators always keep every capability.
 
 ## Quick reference: case IDs
 

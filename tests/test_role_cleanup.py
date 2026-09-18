@@ -8,7 +8,7 @@ from octotracker.config import Config
 
 LEGACY = 1547037223558451291
 AUTO = 1547371277474603028
-SWEEP_ONLY = 1547038342661804194
+SWEEP_ONLY = 1547038342661804194  # a role that no longer triggers anything
 UNRELATED = 999
 
 
@@ -66,10 +66,6 @@ class RoleCleanupTests(unittest.IsolatedAsyncioTestCase):
         config = _config()
         self.assertEqual(config.role_cleanup_remove_role_id, LEGACY)
         self.assertEqual(config.role_cleanup_auto_trigger_role_ids, frozenset({AUTO}))
-        self.assertEqual(
-            config.role_cleanup_sweep_trigger_role_ids,
-            frozenset({1547038342661804194, 1547038337297154078, 1547038296025333880, AUTO}),
-        )
 
     async def test_gaining_the_trigger_role_removes_the_legacy_role(self) -> None:
         before = _Member(self.guild, 1, [LEGACY])
@@ -107,12 +103,6 @@ class RoleCleanupTests(unittest.IsolatedAsyncioTestCase):
         after = _Member(self.guild, 1, [AUTO])
         await self.cog.on_member_update(before, after)
         self.assertEqual(after.removed, [])
-
-    def test_sweep_trigger_check_covers_all_four_roles(self) -> None:
-        triggers = self.cog.bot.config.role_cleanup_sweep_trigger_role_ids
-        self.assertTrue(self.cog._has_any(_Member(self.guild, 1, [SWEEP_ONLY]), triggers))
-        self.assertTrue(self.cog._has_any(_Member(self.guild, 1, [AUTO]), triggers))
-        self.assertFalse(self.cog._has_any(_Member(self.guild, 1, [UNRELATED, LEGACY]), triggers))
 
 
 if __name__ == "__main__":

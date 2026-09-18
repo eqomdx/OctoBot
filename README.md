@@ -1,4 +1,4 @@
-# OctoBot v1.0.11
+# OctoBot v1.0.12
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -17,6 +17,7 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
   - `RADIO_LIVE_ALERTS=true` additionally pings when a DJ goes live outside the schedule.
   - The ping lists three ways to listen: in-game radio, the radio website, and the live DJ's own Twitch stream (Whiski, Mossa, Tekeela, Sabellwind are built in; `RADIO_DJ_STREAMS` overrides the table).
 - Tracker command role configuration under `/config command-role`
+- `/authcheck` is open to everyone but only works in the channel set by `DISCORD_AUTHCHECK_CHANNEL_ID` (default `1547064843909988433`)
 
 ### OctoCop moderation
 - `/timeout` with `s`, `m`, `h`, `d`, `w` durations and combined values such as `1h30m`
@@ -45,12 +46,15 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 - `/clearcheck`
   - Clears the user's full `/check`/`/warnings` profile after a confirmation prompt.
   - History removal is soft-delete only: database rows remain for audit and an active Discord timeout is not lifted.
-- `/settings ...` moderation configuration
+- `/settings ...` moderation configuration (Discord Administrator or server owner only)
+- Raid protection: `/lockdown toggle on|off`, `/lockdown timer minutes`, `/lockdown status` (settings permission).
+  - While on, every new joiner is DMed "We are currently in Lockdown. Please try again soon" and banned for 7 days; the bot lifts each ban automatically when the 7 days are up. Bots joining are ignored.
+  - Lockdown turns itself off after the timer (default 30 minutes). Timer and state persist across restarts.
 - Banned-word filter (replaces the Arcane keyword filter): `/word list`, `/word add word`, `/word remove word` (settings permission; replies are visible only to you).
   - A message containing a banned word is deleted and the author is timed out for 30 seconds (no message-history cleanup). Recorded as a timeout case in `/check`, DMed if timeout DMs are on, and logged to the mod-log channel with the message text.
   - Matching is whole-word and case-insensitive; phrases are allowed and match with spaces, hyphens or no separator. `/word list` is alphabetical. The Arcane word list is seeded automatically the first time the filter starts with an empty list (`octocop/default_banned_words.py`). Server owner, administrators and anyone with a staff profile are exempt. Edited messages are re-checked.
   - The bot needs **Manage Messages** in filtered channels and **Moderate Members**.
-- Legacy-role cleanup: a member who gains role `1547371277474603028` automatically loses role `1547037223558451291`. `/rolesweep` (settings permission) does a one-off pass over every member, also treating `1547038342661804194`, `1547038337297154078` and `1547038296025333880` as triggers. Configurable via `ROLE_CLEANUP_*`; needs the **Server Members Intent** enabled in the Developer Portal.
+- Legacy-role cleanup: a member who gains role `1547371277474603028` automatically loses role `1547037223558451291`. Configurable via `ROLE_CLEANUP_*`; needs the **Server Members Intent** enabled in the Developer Portal.
 - Helper default timeout limit: 1 hour
 - Moderator/Admin default timeout limit: Discord maximum (4 weeks)
 - Optional timeout message cleanup window
@@ -178,3 +182,7 @@ Members who gain role `1547371277474603028` automatically lose role `15470372235
 ## v1.0.11 /check remove parameter, command guide
 
 `/check user remove:W-0003` replaces the per-case ❌ buttons. `COMMANDS.md` documents every command by tier (Everyone, Helper+, Mod+, Admin only).
+
+## v1.0.12 lockdown, admin-only settings, public /authcheck
+
+`/lockdown toggle|timer|status` raid protection: joiners during a lockdown are DMed and banned for 7 days, then unbanned automatically; lockdown ends itself after the timer. `/settings` now requires Discord Administrator. `/authcheck` is open to everyone but only in its designated channel. `/rolesweep` removed (the automatic legacy-role swap remains).

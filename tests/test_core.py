@@ -237,7 +237,8 @@ class CommandRegistrationTests(unittest.TestCase):
         authcheck = next(
             command for command in guild_commands if command.name == "authcheck"
         )
-        self.assertTrue(authcheck.default_permissions.administrator)
+        # Public command, restricted by channel at runtime rather than by permission.
+        self.assertIsNone(authcheck.default_permissions)
         config_group = next(
             command for command in guild_commands if command.name == "config"
         )

@@ -76,7 +76,9 @@ class Database:
                 dm_warnings INTEGER NOT NULL DEFAULT 1,
                 dm_timeouts INTEGER NOT NULL DEFAULT 1,
                 dm_bans INTEGER NOT NULL DEFAULT 1,
-                timeout_cleanup_minutes INTEGER NOT NULL DEFAULT 0
+                timeout_cleanup_minutes INTEGER NOT NULL DEFAULT 0,
+                lockdown_until TEXT,
+                lockdown_minutes INTEGER NOT NULL DEFAULT 30
             );
 
             CREATE TABLE IF NOT EXISTS role_permissions (
@@ -152,6 +154,17 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_notes_guild_user
                 ON notes(guild_id, user_id, created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS lockdown_bans (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                banned_at TEXT NOT NULL,
+                unban_at TEXT NOT NULL,
+                unbanned_at TEXT,
+                PRIMARY KEY (guild_id, user_id, banned_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_lockdown_bans_pending
+                ON lockdown_bans(guild_id, unbanned_at, unban_at);
+
             CREATE TABLE IF NOT EXISTS banned_words (
                 guild_id INTEGER NOT NULL,
                 word TEXT NOT NULL,
@@ -189,6 +202,12 @@ class Database:
         if "dm_bans" not in guild_columns:
             await self.db.execute(
                 "ALTER TABLE guild_settings ADD COLUMN dm_bans INTEGER NOT NULL DEFAULT 1"
+            )
+        if "lockdown_until" not in guild_columns:
+            await self.db.execute("ALTER TABLE guild_settings ADD COLUMN lockdown_until TEXT")
+        if "lockdown_minutes" not in guild_columns:
+            await self.db.execute(
+                "ALTER TABLE guild_settings ADD COLUMN lockdown_minutes INTEGER NOT NULL DEFAULT 30"
             )
 
         async with self.db.execute("PRAGMA table_info(role_permissions)") as cur:
@@ -264,6 +283,75 @@ class Database:
             (minutes, guild_id),
         )
         await self.db.commit()
+
+    async def set_lockdown_until(self, guild_id: int, until: datetime | None) -> None:
+        await self.ensure_guild(guild_id)
+        await self.db.execute(
+            "UPDATE guild_settings SET lockdown_until = ? WHERE guild_id = ?",
+            (until.astimezone(timezone.utc).isoformat() if until else None, guild_id),
+        )
+        await self.db.commit()
+
+    async def set_lockdown_minutes(self, guild_id: int, minutes: int) -> None:
+        await self.ensure_guild(guild_id)
+        await self.db.execute(
+            "UPDATE guild_settings SET lockdown_minutes = ? WHERE guild_id = ?",
+            (minutes, guild_id),
+        )
+        await self.db.commit()
+
+    async def add_lockdown_ban(
+        self, guild_id: int, user_id: int, banned_at: datetime, unban_at: datetime
+    ) -> None:
+        async with self._lock:
+            await self.db.execute(
+                """
+                INSERT OR REPLACE INTO lockdown_bans(guild_id, user_id, banned_at, unban_at, unbanned_at)
+                VALUES (?, ?, ?, ?, NULL)
+                """,
+                (guild_id, user_id, banned_at.isoformat(), unban_at.isoformat()),
+            )
+            await self.db.commit()
+
+    async def expired_lockdown_bans(self, guild_id: int, now: datetime) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            """
+            SELECT * FROM lockdown_bans
+            WHERE guild_id = ? AND unbanned_at IS NULL AND unban_at <= ?
+            ORDER BY unban_at ASC
+            """,
+            (guild_id, now.isoformat()),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(row) for row in rows]
+
+    async def mark_lockdown_unbanned(self, guild_id: int, user_id: int, at: datetime) -> None:
+        async with self._lock:
+            await self.db.execute(
+                """
+                UPDATE lockdown_bans SET unbanned_at = ?
+                WHERE guild_id = ? AND user_id = ? AND unbanned_at IS NULL
+                """,
+                (at.isoformat(), guild_id, user_id),
+            )
+            await self.db.commit()
+
+    async def count_active_lockdown_bans(self, guild_id: int, now: datetime) -> int:
+        async with self.db.execute(
+            "SELECT COUNT(*) AS count FROM lockdown_bans WHERE guild_id = ? AND unbanned_at IS NULL AND unban_at > ?",
+            (guild_id, now.isoformat()),
+        ) as cur:
+            return int((await cur.fetchone())["count"])
+
+    async def count_lockdown_bans_since(self, guild_id: int, since: datetime | None) -> int:
+        if since is None:
+            query = "SELECT COUNT(*) AS count FROM lockdown_bans WHERE guild_id = ?"
+            params: tuple = (guild_id,)
+        else:
+            query = "SELECT COUNT(*) AS count FROM lockdown_bans WHERE guild_id = ? AND banned_at >= ?"
+            params = (guild_id, since.isoformat())
+        async with self.db.execute(query, params) as cur:
+            return int((await cur.fetchone())["count"])
 
     async def set_dm_setting(self, guild_id: int, setting: str, enabled: bool) -> None:
         if setting not in {"dm_warnings", "dm_timeouts", "dm_bans"}:
