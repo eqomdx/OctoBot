@@ -74,6 +74,7 @@ MODERATION_HELP_DESCRIPTIONS: dict[str, str] = {
     "settings": "Configure OctoBot moderation permissions and behaviour (administrators).",
     "word": "Manage the banned-word filter (list / add / remove).",
     "lockdown": "Raid protection: toggle, timer and status.",
+    "autoreply": "Fixed replies to keywords (add / edit / remove / list).",
 }
 
 
@@ -149,6 +150,7 @@ class OctoBot(commands.Bot):
         await self._seed_moderation_defaults()
 
         from octocop.cogs.moderation import ModerationCog
+        from octocop.cogs.autoreply import AutoReplyCog
         from octocop.cogs.lockdown import LockdownCog
         from octocop.cogs.roles import RoleCleanupCog
         from octocop.cogs.settings import SettingsCog
@@ -160,6 +162,7 @@ class OctoBot(commands.Bot):
         await self.add_cog(RoleCleanupCog(self), guild=self.guild)
         await self.add_cog(WordFilterCog(self), guild=self.guild)
         await self.add_cog(LockdownCog(self), guild=self.guild)
+        await self.add_cog(AutoReplyCog(self), guild=self.guild)
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_seconds),
             headers={"User-Agent": "OctoBot/1.0 (+OctoWoW Discord bot)"},
@@ -538,6 +541,7 @@ class OctoBot(commands.Bot):
                 visible.append(("clearcheck", MODERATION_HELP_DESCRIPTIONS["clearcheck"]))
                 visible.append(("word", MODERATION_HELP_DESCRIPTIONS["word"]))
                 visible.append(("lockdown", MODERATION_HELP_DESCRIPTIONS["lockdown"]))
+                visible.append(("autoreply", MODERATION_HELP_DESCRIPTIONS["autoreply"]))
             if self._is_administrator(interaction):
                 visible.append(("settings", MODERATION_HELP_DESCRIPTIONS["settings"]))
 

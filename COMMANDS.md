@@ -88,6 +88,19 @@ Any message containing a banned word is deleted and the author timed out for 30 
 
 All replies are private. Adds and removes go to the mod log.
 
+### Auto-replies (`/autoreply …`)
+
+When anyone's message contains a keyword, the bot replies to it with a fixed message. Example: `/autoreply add down Server is currently down for scheduled maintenance, read more here: <link>`.
+
+| Command | What it does |
+| --- | --- |
+| `/autoreply add keyword message` | Start replying to `keyword` with `message`. |
+| `/autoreply edit keyword message` | Change the reply for an existing keyword. |
+| `/autoreply remove keyword` | Stop replying to it. |
+| `/autoreply list` | All keywords and their replies. |
+
+Whole-word and case-insensitive, phrases allowed. One reply per keyword per channel per minute so a busy conversation gets a single answer. Replies never ping anyone. Changes go to the mod log.
+
 ### Raid protection (`/lockdown …`)
 
 Starting a lockdown bans everyone who joined in the **previous 10 minutes** (staff and bots excluded). While it is on, every new joiner is DMed "We are currently in Lockdown. Please try again soon" and banned for **7 days**. The bot unbans them automatically when the 7 days are up.

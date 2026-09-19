@@ -165,6 +165,15 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_lockdown_bans_pending
                 ON lockdown_bans(guild_id, unbanned_at, unban_at);
 
+            CREATE TABLE IF NOT EXISTS auto_replies (
+                guild_id INTEGER NOT NULL,
+                keyword TEXT NOT NULL,
+                response TEXT NOT NULL,
+                updated_by INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, keyword)
+            );
+
             CREATE TABLE IF NOT EXISTS banned_words (
                 guild_id INTEGER NOT NULL,
                 word TEXT NOT NULL,
@@ -593,6 +602,39 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return [str(row["word"]) for row in rows]
+
+    async def list_auto_replies(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT keyword, response FROM auto_replies WHERE guild_id = ? ORDER BY keyword",
+            (guild_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(row) for row in rows]
+
+    async def upsert_auto_reply(self, guild_id: int, keyword: str, response: str, updated_by: int) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._lock:
+            await self.db.execute(
+                """
+                INSERT INTO auto_replies(guild_id, keyword, response, updated_by, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, keyword) DO UPDATE SET
+                    response = excluded.response,
+                    updated_by = excluded.updated_by,
+                    updated_at = excluded.updated_at
+                """,
+                (guild_id, keyword, response, updated_by, now),
+            )
+            await self.db.commit()
+
+    async def remove_auto_reply(self, guild_id: int, keyword: str) -> bool:
+        async with self._lock:
+            cur = await self.db.execute(
+                "DELETE FROM auto_replies WHERE guild_id = ? AND keyword = ?",
+                (guild_id, keyword),
+            )
+            await self.db.commit()
+            return cur.rowcount > 0
 
     async def add_banned_word(self, guild_id: int, word: str, added_by: int) -> bool:
         now = datetime.now(timezone.utc).isoformat()

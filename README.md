@@ -1,4 +1,4 @@
-# OctoBot v1.0.13
+# OctoBot v1.0.14
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -50,6 +50,8 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 - Raid protection: `/lockdown toggle on|off`, `/lockdown cancel`, `/lockdown timer duration`, `/lockdown status` (settings permission).
   - Starting a lockdown bans everyone who joined in the previous 10 minutes (staff and bots excluded). While on, every new joiner is DMed "We are currently in Lockdown. Please try again soon" and banned for 7 days; the bot lifts each ban automatically when the 7 days are up.
   - Lockdown turns itself off after the timer (default 30 minutes; accepts `90s`, `2h`, `1d`, up to 7 days). `/lockdown cancel` stops it early. Timer and state persist across restarts.
+- Auto-replies: `/autoreply add keyword message`, `/autoreply edit keyword message`, `/autoreply remove keyword`, `/autoreply list` (settings permission).
+  - When a message contains the keyword (whole-word, case-insensitive, phrases allowed) the bot replies to it with the fixed message. One reply per keyword per channel per minute. Bots are ignored.
 - Banned-word filter (replaces the Arcane keyword filter): `/word list`, `/word add word`, `/word remove word` (settings permission; replies are visible only to you).
   - A message containing a banned word is deleted and the author is timed out for 30 seconds (no message-history cleanup). Recorded as a timeout case in `/check`, DMed if timeout DMs are on, and logged to the mod-log channel with the message text.
   - Matching is whole-word and case-insensitive; phrases are allowed and match with spaces, hyphens or no separator. `/word list` is alphabetical. The Arcane word list is seeded automatically the first time the filter starts with an empty list (`octocop/default_banned_words.py`). Server owner, administrators and anyone with a staff profile are exempt. Edited messages are re-checked.
@@ -190,3 +192,7 @@ Members who gain role `1547371277474603028` automatically lose role `15470372235
 ## v1.0.13 lockdown cancel, durations, retroactive ban
 
 `/lockdown cancel` stops a lockdown early. `/lockdown timer` accepts `s`/`m`/`h`/`d` durations up to 7 days (the previous minutes value migrates). Starting a lockdown now also bans everyone who joined in the previous 10 minutes, excluding staff and bots.
+
+## v1.0.14 auto-replies
+
+`/autoreply add|edit|remove|list`: the bot replies with a fixed message whenever a keyword is said (whole-word, case-insensitive, one reply per keyword per channel per minute).
