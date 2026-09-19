@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from octocop.cogs.autoreply import COOLDOWN_SECONDS, AutoReplyCog
+from octocop.cogs.autoreply import DEFAULT_COOLDOWN_SECONDS, AutoReplyCog
 from octocop.database import Database
 
 GUILD = 123
@@ -60,7 +60,18 @@ class AutoReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.cog.handle_message(_Message("down?"), now=10.0))
         self.assertTrue(await self.cog.handle_message(_Message("down", channel_id=2), now=10.0))
         self.assertTrue(await self.cog.handle_message(_Message("realm list"), now=10.0))
-        self.assertTrue(await self.cog.handle_message(_Message("down"), now=COOLDOWN_SECONDS + 1.0))
+        self.assertTrue(await self.cog.handle_message(_Message("down"), now=DEFAULT_COOLDOWN_SECONDS + 1.0))
+
+    async def test_cooldown_is_configurable_and_persisted(self) -> None:
+        await self.cog._ensure_loaded()
+        self.assertEqual(self.cog.cooldown_seconds, 60)
+        await self.db.set_autoreply_cooldown(GUILD, 5)
+        fresh = AutoReplyCog(self.bot)
+        await fresh._ensure_loaded()
+        self.assertEqual(fresh.cooldown_seconds, 5)
+        self.assertTrue(await fresh.handle_message(_Message("down"), now=0.0))
+        self.assertFalse(await fresh.handle_message(_Message("down"), now=4.0))
+        self.assertTrue(await fresh.handle_message(_Message("down"), now=5.0))
 
     async def test_database_round_trip_and_removal(self) -> None:
         rows = await self.db.list_auto_replies(GUILD)
@@ -74,7 +85,7 @@ class AutoReplyTests(unittest.IsolatedAsyncioTestCase):
 
     def test_group_exposes_add_edit_remove_list(self) -> None:
         names = sorted(command.name for command in AutoReplyCog.__cog_app_commands__)
-        self.assertEqual(names, ["add", "edit", "list", "remove"])
+        self.assertEqual(names, ["add", "cooldown", "edit", "list", "remove"])
         self.assertEqual(AutoReplyCog.__cog_group_name__, "autoreply")
 
 

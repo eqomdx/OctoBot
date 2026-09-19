@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from ..duration import DurationError, format_duration, parse_duration
 from ..wordfilter import WordFilter, normalize_word
 
 if TYPE_CHECKING:
@@ -16,8 +17,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # The same keyword is not answered again in the same channel for this long, so a
-# busy conversation about "down" gets one reply, not one per message.
-COOLDOWN_SECONDS = 60
+# busy conversation about "down" gets one reply, not one per message. Adjustable
+# with /autoreply cooldown, up to an hour.
+DEFAULT_COOLDOWN_SECONDS = 60
+MAX_COOLDOWN_SECONDS = 60 * 60
 MAX_RESPONSE_LENGTH = 1800
 
 
@@ -36,6 +39,7 @@ class AutoReplyCog(
         self.bot = bot
         self.matcher = WordFilter()
         self.responses: dict[str, str] = {}
+        self.cooldown_seconds = DEFAULT_COOLDOWN_SECONDS
         self._loaded = False
         self._last_sent: dict[tuple[int, str], float] = {}
 
@@ -45,9 +49,12 @@ class AutoReplyCog(
     async def _ensure_loaded(self) -> None:
         if self._loaded:
             return
-        rows = await self.bot.moderation_database.list_auto_replies(self.bot.config.guild_id)
+        guild_id = self.bot.config.guild_id
+        rows = await self.bot.moderation_database.list_auto_replies(guild_id)
         self.responses = {row["keyword"]: row["response"] for row in rows}
         self.matcher = WordFilter(list(self.responses))
+        settings = await self.bot.moderation_database.get_guild_settings(guild_id)
+        self.cooldown_seconds = int(settings.get("autoreply_cooldown_seconds") or DEFAULT_COOLDOWN_SECONDS)
         self._loaded = True
 
     # ------------------------------------------------------------------ replies
@@ -61,7 +68,7 @@ class AutoReplyCog(
 
     def _on_cooldown(self, channel_id: int, keyword: str, now: float) -> bool:
         last = self._last_sent.get((channel_id, keyword))
-        if last is not None and now - last < COOLDOWN_SECONDS:
+        if last is not None and now - last < self.cooldown_seconds:
             return True
         self._last_sent[(channel_id, keyword)] = now
         return False
@@ -221,8 +228,31 @@ class AutoReplyCog(
             embed.add_field(name=f"`{key}`", value=self.responses[key][:1024], inline=False)
             if len(embed.fields) == 25:
                 break
-        embed.set_footer(text=f"Whole-word, case-insensitive • one reply per keyword per channel every {COOLDOWN_SECONDS}s")
+        embed.set_footer(
+            text=f"Whole-word, case-insensitive • one reply per keyword per channel every {format_duration(self.cooldown_seconds)}"
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="cooldown", description="Set how long before the same keyword is answered again in a channel.")
+    @app_commands.describe(duration="Seconds or minutes, e.g. 30s, 2m, 1m30s. Maximum 60m.")
+    @app_commands.guild_only()
+    async def cooldown(self, interaction: discord.Interaction, duration: str) -> None:
+        context = await self._require_manage(interaction)
+        if context is None:
+            return
+        _, guild = context
+        try:
+            seconds = parse_duration(duration, maximum=MAX_COOLDOWN_SECONDS)
+        except DurationError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await self._ensure_loaded()
+        await self.bot.moderation_database.set_autoreply_cooldown(guild.id, seconds)
+        self.cooldown_seconds = seconds
+        await interaction.response.send_message(
+            f"Auto-reply cooldown set to **{format_duration(seconds)}** per keyword per channel.",
+            ephemeral=True,
+        )
 
     @edit.autocomplete("keyword")
     @remove.autocomplete("keyword")

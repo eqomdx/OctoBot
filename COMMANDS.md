@@ -98,8 +98,9 @@ When anyone's message contains a keyword, the bot replies to it with a fixed mes
 | `/autoreply edit keyword message` | Change the reply for an existing keyword. |
 | `/autoreply remove keyword` | Stop replying to it. |
 | `/autoreply list` | All keywords and their replies. |
+| `/autoreply cooldown duration` | How long before the same keyword is answered again in a channel. `30s`, `2m`, `1m30s`; max `60m`; default `1m`. |
 
-Whole-word and case-insensitive, phrases allowed. One reply per keyword per channel per minute so a busy conversation gets a single answer. Replies never ping anyone. Changes go to the mod log.
+Whole-word and case-insensitive, phrases allowed. One reply per keyword per channel per cooldown so a busy conversation gets a single answer. Replies never ping anyone. Changes go to the mod log.
 
 ### Raid protection (`/lockdown …`)
 
