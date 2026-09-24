@@ -72,6 +72,17 @@ All replies are private. Everything is posted to the mod-log channel with your n
 | `/warnings user [channel]` | Just the warnings. Add `channel` to post them publicly there instead of privately. |
 | `/history user [amount]` | The user's last 1–50 server messages (default 10), oldest to newest, with channel and jump link. Deleted messages stay listed and are marked. Paged with ◀ ▶. Uses the same access as `/check`. |
 
+### Clearing messages
+
+**`/clear amount`** — deletes recent messages in the channel you run it in.
+
+| Form | What it does |
+| --- | --- |
+| `/clear 10` | The 10 most recent messages (1-200). |
+| `/clear 5m` | Everything posted in the last 5 minutes (`30s`, `5m`, `1h`; max 1 hour). |
+
+Stops at 500 messages for a time clear; run it again for more. Discord cannot bulk-delete messages older than 14 days. The count and channel go to the mod log. **(private reply)**
+
 ### Clearing history
 
 **`/clearcheck user`** — wipes the user's entire `/check` profile after a confirmation button. Rows are kept for audit; an active Discord timeout is not lifted.

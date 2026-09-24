@@ -1,4 +1,4 @@
-# OctoBot v1.0.16
+# OctoBot v1.0.17
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -44,6 +44,8 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
   - Shows the full active moderation history, including every warning/timeout/ban reason, moderator, timestamp, timeout duration, and cleanup details.
   - Accepts users who are no longer in the server, so a banned user's record can be reviewed before an unban.
   - `/check user remove:W-0003` removes one case from history (settings permission). Case IDs are shown on every entry.
+- `/clear 10` or `/clear 5m`
+  - Deletes recent messages in the channel it is run in: a message count (1-200) or everything from the last period (`30s`, `5m`, `1h`; capped at 1 hour and 500 messages). Logged to the mod-log channel.
 - `/clearcheck`
   - Clears the user's full `/check`/`/warnings` profile after a confirmation prompt.
   - History removal is soft-delete only: database rows remain for audit and an active Discord timeout is not lifted.
@@ -205,3 +207,7 @@ Members who gain role `1547371277474603028` automatically lose role `15470372235
 ## v1.0.16 timeout cleanup fix and timeout replacement
 
 Message cleanup crashed on every timeout (`PartialMessage.delete()` does not take `reason`) and scanned channels one message at a time; it now bulk-purges channels concurrently, so cleanup finishes in seconds. Timing out an already-timed-out user shows a confirmation with the existing case, moderator, reason and remaining time instead of refusing.
+
+## v1.0.17 /clear
+
+`/clear 10` deletes the 10 most recent messages in the channel; `/clear 5m` deletes everything from the last 5 minutes. Counts are capped at 200, time at 1 hour and 500 messages.

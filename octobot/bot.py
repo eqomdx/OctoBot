@@ -67,6 +67,7 @@ MODERATION_HELP_DESCRIPTIONS: dict[str, str] = {
     "whisper": "Send a user a direct message from the bot.",
     "warn": "Record a warning and DM the member.",
     "note": "Add a staff-only note to a member's /check history.",
+    "clear": "Delete recent messages in the current channel.",
     "warnings": "View a member's recorded warnings.",
     "check": "View a member's complete warning/timeout history and reasons.",
     "clearcheck": "Clear a member's recorded /check history.",
@@ -538,6 +539,7 @@ class OctoBot(commands.Bot):
                 visible.append(("check", MODERATION_HELP_DESCRIPTIONS["check"]))
                 visible.append(("history", MODERATION_HELP_DESCRIPTIONS["history"]))
             if mod_perms.can_manage_settings:
+                visible.append(("clear", MODERATION_HELP_DESCRIPTIONS["clear"]))
                 visible.append(("clearcheck", MODERATION_HELP_DESCRIPTIONS["clearcheck"]))
                 visible.append(("word", MODERATION_HELP_DESCRIPTIONS["word"]))
                 visible.append(("lockdown", MODERATION_HELP_DESCRIPTIONS["lockdown"]))

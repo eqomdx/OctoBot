@@ -10,7 +10,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..duration import DurationError, format_duration, parse_duration
+from ..duration import (
+    MAX_CLEAR_MESSAGES,
+    DurationError,
+    format_duration,
+    parse_clear_amount,
+    parse_duration,
+)
 from ..history_ui import (
     CASE_PREFIXES,
     ClearHistoryConfirmView,
@@ -31,6 +37,9 @@ log = logging.getLogger(__name__)
 # concurrently, each capped at this many messages.
 CLEANUP_CONCURRENCY = 8
 CLEANUP_PER_CHANNEL_LIMIT = 200
+# A time-based /clear still stops after this many messages, so a quiet hour cannot
+# turn into a thousand-message purge by accident.
+CLEAR_TIME_MESSAGE_CAP = 500
 
 
 class TimeoutRefused(Exception):
@@ -480,6 +489,92 @@ class ModerationCog(commands.Cog):
             f"Timed out {user.mention} for **{format_duration(seconds)}**. Case `T-{timeout_id:04d}`."
             f"{replaced_note}{cleanup_note}{dm_note}"
         )
+
+    @app_commands.command(
+        name="clear",
+        description="Delete recent messages in this channel, by count or by time.",
+    )
+    @app_commands.describe(
+        amount="A number of messages (10) or a time (30s, 5m, 1h). Time is capped at 1 hour."
+    )
+    @app_commands.guild_only()
+    async def clear_command(self, interaction: discord.Interaction, amount: str) -> None:
+        context = await self._member_and_guild(interaction)
+        if context is None:
+            return
+        actor, guild = context
+        perms = await self.bot.moderation_permissions.for_member(actor)
+        if not perms.can_manage_settings:
+            await interaction.response.send_message(
+                "You do not have permission to use `/clear`.", ephemeral=True
+            )
+            return
+
+        try:
+            mode, value = parse_clear_amount(amount)
+        except DurationError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        channel = interaction.channel
+        if channel is None or not hasattr(channel, "purge"):
+            await interaction.response.send_message(
+                "This channel's messages cannot be cleared.", ephemeral=True
+            )
+            return
+        bot_member = guild.me
+        if bot_member is not None:
+            try:
+                channel_perms = channel.permissions_for(bot_member)
+            except (AttributeError, TypeError):
+                channel_perms = None
+            if channel_perms is not None and not (
+                channel_perms.read_message_history and channel_perms.manage_messages
+            ):
+                await interaction.response.send_message(
+                    "I need **Read Message History** and **Manage Messages** in this channel.",
+                    ephemeral=True,
+                )
+                return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        reason = f"OctoBot clear | {actor} ({actor.id})"[:512]
+        if mode == "count":
+            limit, after, described = value, None, f"the last **{value}** message(s)"
+        else:
+            limit = CLEAR_TIME_MESSAGE_CAP
+            after = discord.utils.utcnow() - timedelta(seconds=value)
+            described = f"the previous **{format_duration(value)}**"
+        try:
+            removed = await channel.purge(
+                limit=limit, before=None, after=after, oldest_first=False,
+                bulk=True, reason=reason,
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Discord refused the deletion. Check that I have **Manage Messages** here.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as exc:
+            await interaction.followup.send(f"Discord rejected the deletion: `{exc}`", ephemeral=True)
+            return
+
+        note = ""
+        if mode == "seconds" and len(removed) == CLEAR_TIME_MESSAGE_CAP:
+            note = f" Stopped at the {CLEAR_TIME_MESSAGE_CAP}-message limit; run it again for more."
+        await interaction.followup.send(
+            f"Deleted **{len(removed)}** message(s) from {described} in {channel.mention}.{note}",
+            ephemeral=True,
+        )
+
+        audit = discord.Embed(
+            title="Messages cleared",
+            description=f"Deleted **{len(removed)}** message(s) from {described}.",
+        )
+        audit.add_field(name="Channel", value=f"<#{channel.id}>", inline=True)
+        audit.add_field(name="By", value=actor.mention, inline=True)
+        await self._log(guild, audit)
 
     @app_commands.command(name="untimeout", description="Remove a user's active timeout early.")
     @app_commands.describe(user="User whose timeout should be removed", reason="Reason for removing it")

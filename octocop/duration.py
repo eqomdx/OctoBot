@@ -49,6 +49,32 @@ def parse_duration(value: str, *, maximum: int | None = MAX_TIMEOUT_SECONDS) -> 
     return total
 
 
+MAX_CLEAR_SECONDS = 60 * 60
+MAX_CLEAR_MESSAGES = 200
+
+
+def parse_clear_amount(value: str) -> tuple[str, int]:
+    """Read the /clear argument, which is either a message count or a duration.
+
+    Returns ("count", n) for a bare number such as ``10``, or ("seconds", n) for a
+    duration such as ``30s``, ``5m`` or ``1h``. Raises DurationError on anything else.
+    """
+    raw = (value or "").strip().lower().replace(" ", "")
+    if not raw:
+        raise DurationError("Enter a number of messages (`10`) or a time (`5m`).")
+    if raw.isdigit():
+        count = int(raw)
+        if count <= 0:
+            raise DurationError("Enter at least 1 message.")
+        if count > MAX_CLEAR_MESSAGES:
+            raise DurationError(f"You can clear at most {MAX_CLEAR_MESSAGES} messages at a time.")
+        return "count", count
+    if raw.endswith(("d", "w")):
+        raise DurationError("Time clears are limited to 1 hour. Use `s`, `m` or `h`.")
+    seconds = parse_duration(raw, maximum=MAX_CLEAR_SECONDS)
+    return "seconds", seconds
+
+
 def format_duration(seconds: int) -> str:
     seconds = max(0, int(seconds))
     if seconds == 0:
