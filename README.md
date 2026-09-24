@@ -1,4 +1,4 @@
-# OctoBot v1.0.15
+# OctoBot v1.0.16
 
 OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one Discord bot process and one Discord application/token.
 
@@ -21,6 +21,7 @@ OctoBot combines the existing **OctoTracker** and **OctoCop** projects into one 
 
 ### OctoCop moderation
 - `/timeout` with `s`, `m`, `h`, `d`, `w` durations and combined values such as `1h30m`
+  - Timing out a user who is already timed out shows a confirmation naming the existing case, its moderator, reason and remaining time; confirming replaces it and voids the old case.
 - `/untimeout`
   - Removing a timeout early voids that timeout from `/check` history, timeout count, and total timeout time while retaining the audit record.
 - `/ban user reason`
@@ -200,3 +201,7 @@ Members who gain role `1547371277474603028` automatically lose role `15470372235
 ## v1.0.15 auto-reply cooldown
 
 `/autoreply cooldown duration` sets how long before the same keyword is answered again in a channel (`30s`–`60m`, default 1m).
+
+## v1.0.16 timeout cleanup fix and timeout replacement
+
+Message cleanup crashed on every timeout (`PartialMessage.delete()` does not take `reason`) and scanned channels one message at a time; it now bulk-purges channels concurrently, so cleanup finishes in seconds. Timing out an already-timed-out user shows a confirmation with the existing case, moderator, reason and remaining time instead of refusing.

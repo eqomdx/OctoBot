@@ -248,6 +248,87 @@ class ModerationHistoryView(discord.ui.View):
         return embed
 
 
+class ReplaceTimeoutConfirmView(discord.ui.View):
+    """Confirm replacing a timeout that is still running."""
+
+    def __init__(
+        self,
+        *,
+        cog: "ModerationCog",
+        owner: discord.Member,
+        guild: discord.Guild,
+        target: discord.Member,
+        seconds: int,
+        reason: str,
+    ):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.bot = cog.bot
+        self.owner_id = owner.id
+        self.guild = guild
+        self.target = target
+        self.seconds = seconds
+        self.reason = reason
+
+    async def _guard(self, interaction: discord.Interaction) -> discord.Member | None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the staff member who ran the command can use these controls.", ephemeral=True
+            )
+            return None
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This control only works in a server.", ephemeral=True)
+            return None
+        perms = await self.bot.moderation_permissions.for_member(interaction.user)
+        if not perms.can_timeout or self.seconds > perms.max_timeout_seconds:
+            await interaction.response.send_message(
+                "You no longer have permission to issue this timeout.", ephemeral=True
+            )
+            return None
+        return interaction.user
+
+    @discord.ui.button(label="Replace timeout", emoji="⏱️", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        actor = await self._guard(interaction)
+        if actor is None:
+            return
+        previous = await self.bot.moderation_database.latest_open_timeout(
+            self.guild.id, self.target.id
+        )
+        # The earlier case is voided the same way /untimeout voids one, so the
+        # replaced timeout does not also count in /check.
+        replaced_id = await self.bot.moderation_database.end_latest_timeout(
+            self.guild.id, self.target.id, actor.id,
+            f"Replaced by a new timeout from {actor}",
+        )
+        await interaction.response.edit_message(
+            content="Replacing the timeout…", view=None
+        )
+        try:
+            summary = await self.cog.apply_timeout(
+                guild=self.guild, actor=actor, user=self.target,
+                seconds=self.seconds, reason=self.reason,
+                replaced_case_id=replaced_id if replaced_id is not None else (
+                    int(previous["id"]) if previous else None
+                ),
+            )
+        except Exception as exc:
+            await interaction.edit_original_response(content=str(exc))
+            return
+        await interaction.edit_original_response(content=summary)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the staff member who ran the command can use these controls.", ephemeral=True
+            )
+            return
+        await interaction.response.edit_message(
+            content="Cancelled. The existing timeout is unchanged.", view=None
+        )
+
+
 class ClearHistoryConfirmView(discord.ui.View):
     def __init__(
         self,

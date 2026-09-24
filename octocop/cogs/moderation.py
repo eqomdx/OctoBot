@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import heapq
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import discord
@@ -15,6 +16,7 @@ from ..history_ui import (
     ClearHistoryConfirmView,
     ModerationHistoryView,
     PagedEmbedView,
+    ReplaceTimeoutConfirmView,
     parse_case_id,
 )
 from ..permissions import ban_target_error, moderation_target_error
@@ -24,6 +26,15 @@ if TYPE_CHECKING:
     from octobot.bot import OctoBot
 
 log = logging.getLogger(__name__)
+
+# Cleanup runs while the moderator waits, so it is bounded: channels are purged
+# concurrently, each capped at this many messages.
+CLEANUP_CONCURRENCY = 8
+CLEANUP_PER_CHANNEL_LIMIT = 200
+
+
+class TimeoutRefused(Exception):
+    """Discord refused to apply the timeout; the message is shown to the moderator."""
 
 
 class ModerationCog(commands.Cog):
@@ -212,8 +223,10 @@ class ModerationCog(commands.Cog):
         """Delete the target user's recent messages in accessible guild message channels.
 
         Returns (messages_deleted, channels_scanned, channels_failed_or_skipped).
-        Cleanup is deliberately best-effort: a permission problem in one channel never
-        rolls back an already-successful timeout.
+        Channels are purged concurrently and in bulk, so a server-wide cleanup costs a
+        couple of API calls per channel rather than one per deleted message. Cleanup is
+        deliberately best-effort: a permission problem in one channel never rolls back
+        an already-successful timeout.
         """
         if minutes <= 0:
             return 0, 0, 0
@@ -223,65 +236,59 @@ class ModerationCog(commands.Cog):
             return 0, 0, 1
 
         cutoff = discord.utils.utcnow() - timedelta(minutes=minutes)
-        deleted = 0
-        scanned = 0
-        skipped_or_failed = 0
+        reason = f"OctoBot cleanup | {moderator} ({moderator.id}) | timeout cleanup {minutes}m"[:512]
+        skipped = 0
+        targets = []
         seen: set[int] = set()
 
         # guild.channels covers normal guild channels. guild.threads adds active/cached
-        # threads (including forum posts). Only objects exposing history() are scanned.
-        candidates = [*guild.channels, *guild.threads]
-        for channel in candidates:
+        # threads (including forum posts). Only objects exposing purge() are scanned.
+        for channel in (*guild.channels, *guild.threads):
             channel_id = getattr(channel, "id", None)
-            if channel_id is None or channel_id in seen or not hasattr(channel, "history"):
+            if channel_id is None or channel_id in seen or not hasattr(channel, "purge"):
                 continue
             seen.add(channel_id)
-
             try:
                 channel_perms = channel.permissions_for(bot_member)
             except (AttributeError, TypeError):
                 continue
-
             if not (
                 channel_perms.view_channel
                 and channel_perms.read_message_history
                 and channel_perms.manage_messages
             ):
-                skipped_or_failed += 1
+                skipped += 1
                 continue
+            targets.append(channel)
 
-            scanned += 1
-            try:
-                async for message in channel.history(limit=None, after=cutoff, oldest_first=False):
-                    if message.author.id != user.id:
-                        continue
-                    try:
-                        await message.delete(
-                            reason=(
-                                f"OctoBot cleanup | {moderator} ({moderator.id}) | "
-                                f"timeout cleanup {minutes}m"
-                            )[:512]
-                        )
-                        deleted += 1
-                    except discord.NotFound:
-                        # It was already removed between fetching and deleting.
-                        continue
-                    except (discord.Forbidden, discord.HTTPException):
-                        skipped_or_failed += 1
-                        log.exception(
-                            "Failed to delete message %s during timeout cleanup in channel %s",
-                            message.id,
-                            channel_id,
-                        )
-            except (discord.Forbidden, discord.HTTPException):
-                skipped_or_failed += 1
-                log.exception(
-                    "Failed to read channel %s during timeout cleanup in guild %s",
-                    channel_id,
-                    guild.id,
-                )
+        if not targets:
+            return 0, 0, skipped
 
-        return deleted, scanned, skipped_or_failed
+        semaphore = asyncio.Semaphore(CLEANUP_CONCURRENCY)
+
+        async def purge_channel(channel) -> int:
+            async with semaphore:
+                try:
+                    removed = await channel.purge(
+                        limit=CLEANUP_PER_CHANNEL_LIMIT,
+                        check=lambda message: message.author.id == user.id,
+                        after=cutoff,
+                        oldest_first=False,
+                        bulk=True,
+                        reason=reason,
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    log.exception(
+                        "Failed to clean up channel %s in guild %s", channel.id, guild.id
+                    )
+                    return -1
+                return len(removed)
+
+        results = await asyncio.gather(*(purge_channel(channel) for channel in targets))
+        deleted = sum(count for count in results if count > 0)
+        scanned = sum(1 for count in results if count >= 0)
+        skipped += sum(1 for count in results if count < 0)
+        return deleted, scanned, skipped
 
     @app_commands.command(name="timeout", description="Time out a user for an exact duration.")
     @app_commands.describe(
@@ -338,38 +345,89 @@ class ModerationCog(commands.Cog):
         now = discord.utils.utcnow()
         current_until = user.timed_out_until
         if current_until is not None and current_until > now:
+            # Replacing a running timeout is a real decision, so show who set it and
+            # what it was for, and make the moderator confirm.
+            existing = await self.bot.moderation_database.latest_open_timeout(guild.id, user.id)
             await interaction.response.send_message(
-                f"{user.mention} is already timed out until <t:{int(current_until.timestamp())}:F>. Remove it first with `/untimeout`.",
+                content=self._replace_timeout_prompt(
+                    user=user, existing=existing, current_until=current_until,
+                    seconds=seconds, reason=reason, now=now,
+                ),
+                view=ReplaceTimeoutConfirmView(
+                    cog=self, owner=actor, guild=guild, target=user,
+                    seconds=seconds, reason=reason,
+                ),
                 ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await self.apply_timeout(
+                guild=guild, actor=actor, user=user, seconds=seconds, reason=reason
+            )
+        except TimeoutRefused as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(summary, ephemeral=True)
+
+    @staticmethod
+    def _replace_timeout_prompt(
+        *,
+        user: discord.Member,
+        existing: dict | None,
+        current_until: datetime,
+        seconds: int,
+        reason: str,
+        now: datetime,
+    ) -> str:
+        remaining = format_duration(max(1, int((current_until - now).total_seconds())))
+        lines = [f"⚠️ {user.mention} is **already timed out**."]
+        if existing is not None:
+            issued_by = f"<@{int(existing['moderator_id'])}>"
+            original = format_duration(int(existing.get("duration_seconds") or 0))
+            lines.append(
+                f"Case `T-{int(existing['id']):04d}` — **{original}** by {issued_by}\n"
+                f"Reason: {str(existing.get('reason') or 'No reason recorded')[:500]}"
+            )
+        lines.append(
+            f"**{remaining}** remains (ends <t:{int(current_until.timestamp())}:F>)."
+        )
+        lines.append(
+            f"\nConfirming **replaces** it with a new **{format_duration(seconds)}** timeout "
+            f"starting now, for: {reason[:500]}"
+        )
+        return "\n".join(lines)
+
+    async def apply_timeout(
+        self,
+        *,
+        guild: discord.Guild,
+        actor: discord.Member,
+        user: discord.Member,
+        seconds: int,
+        reason: str,
+        replaced_case_id: int | None = None,
+    ) -> str:
+        """Time the user out, record it, DM them and log it. Returns the staff reply.
+
+        Raises TimeoutRefused when Discord will not apply the timeout.
+        """
+        now = discord.utils.utcnow()
         expires_at = now + timedelta(seconds=seconds)
         audit_reason = f"OctoBot | {actor} ({actor.id}) | {reason}"[:512]
-
-        # Cleanup can scan several channels, so acknowledge the interaction before
-        # performing network operations that may take longer than Discord's response window.
-        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             await user.timeout(timedelta(seconds=seconds), reason=audit_reason)
         except discord.Forbidden:
-            await interaction.followup.send(
-                "Discord refused the timeout. Check that I have **Moderate Members** and that my role is above the target user.",
-                ephemeral=True,
-            )
-            return
+            raise TimeoutRefused(
+                "Discord refused the timeout. Check that I have **Moderate Members** and that my role is above the target user."
+            ) from None
         except discord.HTTPException as exc:
-            await interaction.followup.send(f"Discord rejected the timeout: `{exc}`", ephemeral=True)
-            return
+            raise TimeoutRefused(f"Discord rejected the timeout: `{exc}`") from None
 
         timeout_id = await self.bot.moderation_database.add_timeout(
-            guild.id,
-            user.id,
-            actor.id,
-            seconds,
-            reason,
-            now,
-            expires_at,
+            guild.id, user.id, actor.id, seconds, reason, now, expires_at
         )
 
         settings = await self.bot.moderation_database.get_guild_settings(guild.id)
@@ -379,30 +437,24 @@ class ModerationCog(commands.Cog):
         cleanup_issues = 0
         if cleanup_minutes > 0:
             deleted_count, cleanup_scanned, cleanup_issues = await self._cleanup_recent_messages(
-                guild=guild,
-                user=user,
-                minutes=cleanup_minutes,
-                moderator=actor,
+                guild=guild, user=user, minutes=cleanup_minutes, moderator=actor
             )
             await self.bot.moderation_database.set_timeout_cleanup_result(
                 timeout_id, cleanup_minutes, deleted_count
             )
 
         dm_sent = await self._dm_timeout(
-            guild=guild,
-            user=user,
-            reason=reason,
-            duration_seconds=seconds,
-            timeout_id=timeout_id,
+            guild=guild, user=user, reason=reason,
+            duration_seconds=seconds, timeout_id=timeout_id,
         )
         embed = timeout_embed(
-            user=user,
-            moderator_id=actor.id,
-            reason=reason,
-            timeout_id=timeout_id,
-            duration_seconds=seconds,
-            expires_at=expires_at,
+            user=user, moderator_id=actor.id, reason=reason, timeout_id=timeout_id,
+            duration_seconds=seconds, expires_at=expires_at,
         )
+        if replaced_case_id is not None:
+            embed.add_field(
+                name="Replaced", value=f"Earlier timeout `T-{replaced_case_id:04d}`", inline=True
+            )
         if cleanup_minutes > 0:
             embed.add_field(
                 name="Message cleanup",
@@ -413,6 +465,7 @@ class ModerationCog(commands.Cog):
                 inline=False,
             )
         await self._log(guild, embed)
+
         dm_note = " DM sent." if dm_sent else " DM was not sent (disabled or unavailable)."
         cleanup_note = (
             f" Deleted **{deleted_count}** message(s) from the previous **{cleanup_minutes}m**"
@@ -420,10 +473,12 @@ class ModerationCog(commands.Cog):
             if cleanup_minutes > 0
             else ""
         )
-        await interaction.followup.send(
+        replaced_note = (
+            f" Replaced case `T-{replaced_case_id:04d}`." if replaced_case_id is not None else ""
+        )
+        return (
             f"Timed out {user.mention} for **{format_duration(seconds)}**. Case `T-{timeout_id:04d}`."
-            f"{cleanup_note}{dm_note}",
-            ephemeral=True,
+            f"{replaced_note}{cleanup_note}{dm_note}"
         )
 
     @app_commands.command(name="untimeout", description="Remove a user's active timeout early.")

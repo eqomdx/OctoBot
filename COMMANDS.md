@@ -42,7 +42,7 @@ Times the user out. Duration uses `s` `m` `h` `d` `w` and can be combined: `30m`
 
 - Helpers can issue up to **1 hour**; Moderators/Admins up to **4 weeks**.
 - Refuses: yourself, the owner, bots, administrators, anyone with a role equal to or above yours.
-- If already timed out, use `/untimeout` first.
+- If the user is already timed out, you get a confirmation showing the existing case, who set it, its reason and the time remaining. Confirming replaces it with your new timeout; the old case is voided like `/untimeout`.
 - If message cleanup is on (`/settings timeout-cleanup`), the user's messages from the last N minutes are deleted and the count is shown.
 - Recorded as case `T-####` in `/check`. The DM does not say who issued it. **(private reply)**
 

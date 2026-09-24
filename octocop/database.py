@@ -561,6 +561,19 @@ class Database:
         )
         await self.db.commit()
 
+    async def latest_open_timeout(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        """The newest timeout that has not been ended, for the "already timed out" prompt."""
+        async with self.db.execute(
+            """
+            SELECT * FROM timeouts
+            WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL
+            ORDER BY started_at DESC, id DESC LIMIT 1
+            """,
+            (guild_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row is not None else None
+
     async def end_latest_timeout(
         self,
         guild_id: int,
